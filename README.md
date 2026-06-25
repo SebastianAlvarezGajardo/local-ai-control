@@ -1,4 +1,4 @@
-# localai-control
+# local-ai-control
 
 > Una estación de control GTK con icono en la barra del sistema para tu IA local sobre **Ollama**. Encender/apagar el servicio, liberar VRAM al instante para jugar, descargar modelos, monitorizar GPU/RAM, leer los logs en vivo y lanzar integraciones (Open WebUI, opencode, Aider) — **todo desde un solo sitio**.
 
@@ -10,7 +10,7 @@
 
 ## 🇪🇸 ¿Qué es?
 
-En Mac y Windows Ollama trae una app de bandeja oficial; en Linux no. **`localai-control`** rellena ese hueco y añade unas cuantas cosas que faltaban: gestión de modelos, monitorización de GPU AMD/Intel/NVIDIA, perfiles para jugar / trabajar, y atajos al ecosistema de apps que ya usas con tus modelos locales.
+En Mac y Windows Ollama trae una app de bandeja oficial; en Linux no. **`local-ai-control`** rellena ese hueco y añade unas cuantas cosas que faltaban: gestión de modelos, monitorización de GPU AMD/Intel/NVIDIA, perfiles para jugar / trabajar, y atajos al ecosistema de apps que ya usas con tus modelos locales.
 
 ### Características
 
@@ -30,8 +30,8 @@ En Mac y Windows Ollama trae una app de bandeja oficial; en Linux no. **`localai
 ### Instalación
 
 ```bash
-git clone https://github.com/SebastianAlvarezGajardo/localai-control.git
-cd localai-control
+git clone https://github.com/SebastianAlvarezGajardo/local-ai-control.git
+cd local-ai-control
 ./install.sh
 ```
 
@@ -60,11 +60,11 @@ sudo apt install -y python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
 ### Estructura del proyecto
 
 ```
-localai-control/
-├── localai_control.py            # app principal (un único archivo)
+local-ai-control/
+├── local_ai_control.py            # app principal (un único archivo)
 ├── data/
-│   ├── localai-control.desktop           # lanzador del menú
-│   └── localai-control-autostart.desktop # arranque automático
+│   ├── local-ai-control.desktop           # lanzador del menú
+│   └── local-ai-control-autostart.desktop # arranque automático
 ├── install.sh / uninstall.sh
 ├── README.md  ·  LICENSE  ·  .gitignore
 └── docs/screenshots/
@@ -82,7 +82,7 @@ MIT — © 2026 Sebastián Álvarez Gajardo
 
 ## 🇬🇧 What is it?
 
-Ollama ships an official menu-bar app on macOS and Windows; not on Linux. **`localai-control`** fills that gap and adds a few things that were missing: model management, GPU/RAM monitoring, gaming/work profiles, and shortcuts to the local-AI ecosystem you already use.
+Ollama ships an official menu-bar app on macOS and Windows; not on Linux. **`local-ai-control`** fills that gap and adds a few things that were missing: model management, GPU/RAM monitoring, gaming/work profiles, and shortcuts to the local-AI ecosystem you already use.
 
 ### Features
 
@@ -98,8 +98,8 @@ Ollama ships an official menu-bar app on macOS and Windows; not on Linux. **`loc
 ### Install
 
 ```bash
-git clone https://github.com/SebastianAlvarezGajardo/localai-control.git
-cd localai-control
+git clone https://github.com/SebastianAlvarezGajardo/local-ai-control.git
+cd local-ai-control
 ./install.sh
 ```
 

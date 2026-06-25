@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-localai-control — Tray + control panel for your local AI (Ollama)
+local-ai-control — Tray + control panel for your local AI (Ollama)
 
 A single GTK app that lives in the system tray and exposes the whole
 local-AI lifecycle from one place: start/stop the service, free VRAM,
@@ -8,7 +8,7 @@ download/delete models, see live GPU/RAM stats, follow the service logs,
 launch integrations (Open WebUI, opencode, aider) and switch profiles.
 
 License: MIT — see LICENSE.
-Homepage: https://github.com/SebastianAlvarezGajardo/localai-control
+Homepage: https://github.com/SebastianAlvarezGajardo/local-ai-control
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ except (ValueError, ImportError):
 from gi.repository import GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
-APP_NAME = "localai-control"
+APP_NAME = "local-ai-control"
 VERSION = "0.2.0"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
@@ -145,7 +145,7 @@ def systemctl(action: str) -> subprocess.CompletedProcess:
 
 def notify(title: str, body: str = "") -> None:
     if shutil.which("notify-send"):
-        subprocess.Popen(["notify-send", "-a", "localai-control", title, body])
+        subprocess.Popen(["notify-send", "-a", "local-ai-control", title, body])
 
 
 def open_terminal(cmd: str) -> None:
@@ -720,7 +720,7 @@ class ProfilesTab(Gtk.Box):
 # ── UI: window + tray ─────────────────────────────────────────────────────
 class ControlWindow(Gtk.Window):
     def __init__(self, app: "App"):
-        super().__init__(title=f"localai-control · v{VERSION}")
+        super().__init__(title=f"local-ai-control · v{VERSION}")
         self.set_default_size(720, 560)
         self.set_icon_name("computer")
         self.app = app
@@ -745,6 +745,13 @@ class ControlWindow(Gtk.Window):
 
         # closing hides the window (the tray stays); use "Salir del icono" to quit
         self.connect("delete-event", lambda *_: self.hide() or True)
+
+        # IMPORTANT: show all descendants so notebook + tabs render their content.
+        # Without this the window opens but appears BLANK because individual
+        # widgets default to "not visible". Calling show_all() once here makes
+        # every child visible; subsequent open/close via the tray just hides
+        # the window (delete-event handler) and `present()` brings it back.
+        self.show_all()
 
     def refresh(self) -> None:
         up = service_up()
@@ -778,7 +785,8 @@ class App:
         mi_quit = Gtk.MenuItem(label="Salir del icono")
 
         mi_panel.connect(
-            "activate", lambda _: (self.window.refresh(), self.window.present())
+            "activate",
+            lambda _: (self.window.refresh(), self.window.show_all(), self.window.present()),
         )
         self.mi_free.connect("activate", lambda _: self._do(self._free_all, "Liberando…"))
         self.mi_on.connect(
@@ -790,7 +798,7 @@ class App:
         mi_about.connect(
             "activate",
             lambda _: webbrowser.open(
-                "https://github.com/SebastianAlvarezGajardo/localai-control"
+                "https://github.com/SebastianAlvarezGajardo/local-ai-control"
             ),
         )
         mi_quit.connect("activate", lambda _: Gtk.main_quit())

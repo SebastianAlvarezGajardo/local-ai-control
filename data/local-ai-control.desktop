@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=localai-control
+Name=local-ai-control
 GenericName=Local AI Control
 Comment=Panel de control de la IA local (Ollama)
 Exec=__BIN__ --show

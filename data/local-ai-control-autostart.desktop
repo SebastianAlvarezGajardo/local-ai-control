@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=localai-control (tray)
+Name=local-ai-control (tray)
 Comment=Icono de control de la IA local en la barra superior
 Exec=__BIN__
 Icon=computer

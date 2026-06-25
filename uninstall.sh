@@ -2,9 +2,9 @@
 # Removes everything installed by install.sh.
 set -euo pipefail
 
-BIN="$HOME/.local/bin/localai-control"
-LAUNCHER="$HOME/.local/share/applications/localai-control.desktop"
-AUTOSTART="$HOME/.config/autostart/localai-control.desktop"
+BIN="$HOME/.local/bin/local-ai-control"
+LAUNCHER="$HOME/.local/share/applications/local-ai-control.desktop"
+AUTOSTART="$HOME/.config/autostart/local-ai-control.desktop"
 
 # Stop the running tray (precise match on the binary path)
 for pid in $(pgrep -af "$BIN" | awk '{print $1}'); do
