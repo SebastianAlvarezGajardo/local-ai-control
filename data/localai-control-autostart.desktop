@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=localai-control (tray)
+Comment=Icono de control de la IA local en la barra superior
+Exec=__BIN__
+Icon=computer
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4

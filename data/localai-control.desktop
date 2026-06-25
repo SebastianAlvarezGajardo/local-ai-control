@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=localai-control
+GenericName=Local AI Control
+Comment=Panel de control de la IA local (Ollama)
+Exec=__BIN__ --show
+Icon=computer
+Terminal=false
+Categories=Utility;Development;
+Keywords=ollama;ai;llm;local;
+StartupNotify=false
