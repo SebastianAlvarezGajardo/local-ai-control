@@ -4,6 +4,7 @@
 
 > *English version below 🇬🇧*
 
+[![CI](https://github.com/SebastianAlvarezGajardo/local-ai-control/actions/workflows/ci.yml/badge.svg)](https://github.com/SebastianAlvarezGajardo/local-ai-control/actions/workflows/ci.yml)
 ![GTK](https://img.shields.io/badge/GTK-3-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Ollama](https://img.shields.io/badge/runtime-Ollama-black) ![Status](https://img.shields.io/badge/status-alpha-orange)
 
 ---
@@ -25,7 +26,28 @@ En Mac y Windows Ollama trae una app de bandeja oficial; en Linux no. **`local-a
 
 ### Capturas
 
-> *(añadir en `docs/screenshots/`)*
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/01-tray-menu.png" alt="Icono y menú del tray" width="100%"><br>
+      <sub><b>Icono en la barra + menú rápido</b></sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/02-tab-estado.png" alt="Pestaña Estado" width="100%"><br>
+      <sub><b>Estado · modelos cargados</b></sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/03-tab-modelos.png" alt="Pestaña Modelos" width="100%"><br><sub><b>Modelos · descarga con progreso</b></sub></td>
+    <td align="center"><img src="docs/screenshots/04-tab-recursos.png" alt="Pestaña Recursos" width="100%"><br><sub><b>Recursos · VRAM/CPU/RAM en vivo</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/05-tab-logs.png" alt="Pestaña Logs" width="100%"><br><sub><b>Logs · journalctl -fu ollama</b></sub></td>
+    <td align="center"><img src="docs/screenshots/06-tab-integraciones.png" alt="Pestaña Integraciones" width="100%"><br><sub><b>Integraciones · Open WebUI · opencode · Aider</b></sub></td>
+  </tr>
+</table>
+
+> Las capturas vivirán en `docs/screenshots/` — ver el README de esa carpeta para los nombres y el comando `gnome-screenshot` a usar.
 
 ### Instalación
 

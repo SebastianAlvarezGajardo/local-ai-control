@@ -44,17 +44,25 @@ GPU_CARDS = ("/sys/class/drm/card1/device", "/sys/class/drm/card0/device")
 
 # Curated quick-pick catalog: (model, description). Easy to extend.
 CATALOG: list[tuple[str, str]] = [
+    # — texto / general —
     ("gemma3:1b", "Gemma 3 mini (Google) — ~1 GB, instantáneo"),
     ("gemma3:4b", "Gemma 3 4B (Google) — ~3 GB, equilibrado"),
     ("gemma3:12b", "Gemma 3 12B (Google) — ~8 GB, más capaz"),
-    ("qwen2.5-coder:1.5b", "Qwen2.5 Coder 1.5B — código ligero"),
-    ("qwen2.5-coder:7b", "Qwen2.5 Coder 7B — para programar"),
     ("qwen2.5:7b", "Qwen2.5 7B — general"),
     ("llama3.2:3b", "Llama 3.2 3B (Meta) — ~2 GB, ligero"),
     ("llama3.1:8b", "Llama 3.1 8B (Meta) — general"),
+    ("mistral:7b", "Mistral 7B — general"),
+    # — código —
+    ("qwen2.5-coder:1.5b", "Qwen2.5 Coder 1.5B — código ligero"),
+    ("qwen2.5-coder:7b", "Qwen2.5 Coder 7B — para programar"),
+    # — razonamiento —
     ("deepseek-r1:8b", "DeepSeek-R1 8B — razonamiento paso a paso"),
     ("phi4:14b", "Phi-4 14B (Microsoft) — razona, ~9 GB"),
-    ("mistral:7b", "Mistral 7B — general"),
+    # — multimodal (visión: «lee» imágenes) —
+    ("moondream:1.8b", "Moondream 1.8B — visión ultra-ligera (~1.7 GB)"),
+    ("llava:7b", "LLaVA 7B — visión clásica (~4.7 GB)"),
+    ("llama3.2-vision:11b", "Llama 3.2 Vision 11B (Meta) — visión moderna (~8 GB)"),
+    # — utilidad —
     ("nomic-embed-text", "Embeddings (para RAG) — ~274 MB"),
 ]
 

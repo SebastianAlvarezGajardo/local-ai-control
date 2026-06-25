@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Compile & validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile the script
+        run: python -m py_compile local_ai_control.py
+
+      - name: Install validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils shellcheck
+
+      - name: Validate .desktop files
+        run: |
+          for f in data/*.desktop; do
+            echo "→ $f"
+            sed 's|__BIN__|/usr/bin/local-ai-control|g' "$f" > /tmp/test.desktop
+            desktop-file-validate /tmp/test.desktop
+          done
+
+      - name: Shellcheck shell scripts
+        run: shellcheck install.sh uninstall.sh setup-polkit.sh
