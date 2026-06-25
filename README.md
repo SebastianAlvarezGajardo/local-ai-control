@@ -103,6 +103,16 @@ cd local-ai-control
 ./install.sh
 ```
 
+#### Optional: skip the password prompt when starting/stopping the service
+
+By default each start/stop fires a polkit dialog. To skip it (only for `ollama.service`, nothing else), install the narrow polkit rule shipped in the repo:
+
+```bash
+sudo bash setup-polkit.sh
+```
+
+The rule only allows your current user to `start/stop/restart/reload` `ollama.service`. Undo with `sudo rm /etc/polkit-1/rules.d/50-local-ai-control.rules`.
+
 ### Requirements
 
 - GNOME-based Linux desktop (tested on Ubuntu GNOME 24.x).

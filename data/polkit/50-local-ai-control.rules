@@ -1,0 +1,18 @@
+/* local-ai-control — polkit rule
+ *
+ * Allow user "__USER__" to start / stop / restart / reload the
+ * `ollama.service` systemd unit without an authentication prompt.
+ *
+ * Anything else (other units, other actions, other users) keeps
+ * the default polkit behaviour. This rule is intentionally narrow.
+ *
+ * Installed by setup-polkit.sh — do not edit by hand.
+ */
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "ollama.service" &&
+        ["start", "stop", "restart", "reload"].indexOf(action.lookup("verb")) >= 0 &&
+        subject.user == "__USER__") {
+        return polkit.Result.YES;
+    }
+});
