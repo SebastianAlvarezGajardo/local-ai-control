@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -36,7 +37,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -261,6 +262,63 @@ def comfyui_running() -> bool:
         return True
     except Exception:
         return False
+
+
+def find_pid_matching(pattern: str) -> int | None:
+    """First PID whose full command line matches `pattern` (regex via pgrep -f).
+
+    We exclude our own PID just in case the pattern were loose enough to match
+    a status line in this app's own command line. Returns None if nothing found.
+    """
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", pattern], capture_output=True, text=True, timeout=2
+        )
+        for line in r.stdout.strip().splitlines():
+            try:
+                pid = int(line)
+            except ValueError:
+                continue
+            if pid == os.getpid():
+                continue
+            return pid
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+def stop_pid(pid: int, timeout: float = 3.0) -> bool:
+    """Polite stop: SIGTERM, wait up to `timeout`, escalate to SIGKILL if alive."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.2)
+        except ProcessLookupError:
+            return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+    return True
+
+
+def webui_pid() -> int | None:
+    """Find the running open-webui server process, if any."""
+    return find_pid_matching(r"open[-_]webui.*serve|uvicorn.*open_webui")
+
+
+def comfyui_pid() -> int | None:
+    """Find the running ComfyUI main.py process, if any."""
+    return find_pid_matching(r"ComfyUI/.*python.*main\.py|ComfyUI.*main\.py.*--listen")
 
 
 def human_size(b: float) -> str:
@@ -883,7 +941,7 @@ class IntegrationsTab(Gtk.Box):
             ),
         )
         self.btn_webui_start = Gtk.Button(label="Iniciar servicio")
-        self.btn_webui_start.connect("clicked", lambda _: open_terminal("open-webui serve"))
+        self.btn_webui_start.connect("clicked", self._toggle_webui)
         self.btn_webui_open = Gtk.Button(label="Abrir en navegador")
         self.btn_webui_open.connect("clicked", lambda _: webbrowser.open(OPEN_WEBUI))
         self.webui_status = Gtk.Label(xalign=0)
@@ -983,10 +1041,11 @@ class IntegrationsTab(Gtk.Box):
             "source venv/bin/activate && "
             "HSA_OVERRIDE_GFX_VERSION=11.0.0 python main.py --listen"
         )
+        self._comfy_start_cmd = comfy_start_cmd  # remembered for the toggle button
         self.btn_comfy_install = Gtk.Button(label="Instalar")
         self.btn_comfy_install.connect("clicked", lambda _: open_terminal(comfy_install_cmd))
         self.btn_comfy_start = Gtk.Button(label="Iniciar servicio")
-        self.btn_comfy_start.connect("clicked", lambda _: open_terminal(comfy_start_cmd))
+        self.btn_comfy_start.connect("clicked", self._toggle_comfyui)
         self.btn_comfy_open = Gtk.Button(label="Abrir en navegador")
         self.btn_comfy_open.connect("clicked", lambda _: webbrowser.open(COMFYUI_URL))
         self.comfyui_status = Gtk.Label(xalign=0)
@@ -1017,6 +1076,23 @@ class IntegrationsTab(Gtk.Box):
         )
 
         self.refresh()
+
+    def _toggle_webui(self, _w: Gtk.Button) -> None:
+        """One button to rule both: start if stopped, stop if running."""
+        if pid := webui_pid():
+            ok = stop_pid(pid)
+            notify("Open WebUI parado" if ok else "No se pudo parar Open WebUI", f"PID {pid}")
+            GLib.idle_add(self.app.refresh_all)
+        else:
+            open_terminal("open-webui serve")
+
+    def _toggle_comfyui(self, _w: Gtk.Button) -> None:
+        if pid := comfyui_pid():
+            ok = stop_pid(pid)
+            notify("ComfyUI parado" if ok else "No se pudo parar ComfyUI", f"PID {pid}")
+            GLib.idle_add(self.app.refresh_all)
+        else:
+            open_terminal(self._comfy_start_cmd)
 
     def _category(self, icon_name: str, title: str, content: Gtk.Widget) -> Gtk.Expander:
         """A collapsible group: icon · title (bold) → content below.
@@ -1072,20 +1148,34 @@ class IntegrationsTab(Gtk.Box):
         return frame
 
     def refresh(self) -> None:
+        # ── Open WebUI ──
         if webui_installed():
-            running = webui_running()
-            self.webui_status.set_markup(
-                "✅ instalado · 🟢 corriendo en :8080" if running else "✅ instalado · 🔴 parado"
-            )
+            pid = webui_pid()
+            http_ok = webui_running() if pid else False
+            if pid and http_ok:
+                self.webui_status.set_markup(
+                    f"✅ instalado · 🟢 corriendo en :8080 · PID {pid}"
+                )
+                self.btn_webui_start.set_label("⏹ Parar")
+            elif pid:
+                self.webui_status.set_markup(
+                    f"✅ instalado · 🟡 arrancando (PID {pid})…"
+                )
+                self.btn_webui_start.set_label("⏹ Parar")
+            else:
+                self.webui_status.set_markup("✅ instalado · 🔴 parado")
+                self.btn_webui_start.set_label("Iniciar servicio")
             self.btn_webui_install.set_sensitive(False)
-            self.btn_webui_start.set_sensitive(not running)
-            self.btn_webui_open.set_sensitive(running)
+            self.btn_webui_start.set_sensitive(True)
+            self.btn_webui_open.set_sensitive(bool(http_ok))
         else:
             self.webui_status.set_markup("❌ no instalado")
+            self.btn_webui_start.set_label("Iniciar servicio")
             self.btn_webui_install.set_sensitive(True)
             self.btn_webui_start.set_sensitive(False)
             self.btn_webui_open.set_sensitive(False)
 
+        # ── opencode / Aider (no son servicios persistentes — solo "instalado") ──
         self.opencode_status.set_markup(
             "✅ instalado"
             if find_binary("opencode")
@@ -1095,20 +1185,31 @@ class IntegrationsTab(Gtk.Box):
             "✅ instalado" if find_binary("aider") else "❌ no instalado"
         )
 
+        # ── ComfyUI ──
         if comfyui_installed():
-            running = comfyui_running()
-            self.comfyui_status.set_markup(
-                "✅ instalado · 🟢 corriendo en :8188"
-                if running
-                else "✅ instalado · 🔴 parado"
-            )
+            pid = comfyui_pid()
+            http_ok = comfyui_running() if pid else False
+            if pid and http_ok:
+                self.comfyui_status.set_markup(
+                    f"✅ instalado · 🟢 corriendo en :8188 · PID {pid}"
+                )
+                self.btn_comfy_start.set_label("⏹ Parar")
+            elif pid:
+                self.comfyui_status.set_markup(
+                    f"✅ instalado · 🟡 arrancando (PID {pid})…"
+                )
+                self.btn_comfy_start.set_label("⏹ Parar")
+            else:
+                self.comfyui_status.set_markup("✅ instalado · 🔴 parado")
+                self.btn_comfy_start.set_label("Iniciar servicio")
             self.btn_comfy_install.set_sensitive(False)
-            self.btn_comfy_start.set_sensitive(not running)
-            self.btn_comfy_open.set_sensitive(running)
+            self.btn_comfy_start.set_sensitive(True)
+            self.btn_comfy_open.set_sensitive(bool(http_ok))
         else:
             self.comfyui_status.set_markup(
                 "❌ no instalado · pesa ~10 GB con dependencias + un modelo"
             )
+            self.btn_comfy_start.set_label("Iniciar servicio")
             self.btn_comfy_install.set_sensitive(True)
             self.btn_comfy_start.set_sensitive(False)
             self.btn_comfy_open.set_sensitive(False)
