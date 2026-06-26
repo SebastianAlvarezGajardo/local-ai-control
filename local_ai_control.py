@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -35,7 +36,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -281,6 +282,12 @@ def _install_css() -> None:
     notebook > header > tabs > tab {
         padding: 6px 14px;
     }
+    expander > title {
+        padding: 6px 0;
+    }
+    expander.category {
+        margin-top: 4px;
+    }
     """
     provider = Gtk.CssProvider()
     provider.load_from_data(css)
@@ -378,7 +385,13 @@ class DashboardTab(Gtk.Box):
         head_text.pack_start(self.hero_state, False, False, 0)
         head_text.pack_start(self.hero_summary, False, False, 0)
         head.pack_start(head_text, True, True, 0)
+        # Tiny "last updated Xs ago" badge — quietly confirms the panel is live
+        self.last_update_lbl = Gtk.Label(xalign=1, yalign=0)
+        self.last_update_lbl.set_markup("<small><span alpha='50%'>—</span></small>")
+        head.pack_end(self.last_update_lbl, False, False, 0)
         hero_box.pack_start(head, False, False, 0)
+        self._last_refresh = time.monotonic()
+        GLib.timeout_add(1000, self._tick_badge)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.btn_on = Gtk.Button(label="🟢 Encender")
@@ -438,7 +451,19 @@ class DashboardTab(Gtk.Box):
         GLib.timeout_add(STATS_REFRESH_MS, self._stats_tick)
         self._stats_tick()
 
+    def _tick_badge(self) -> bool:
+        elapsed = int(time.monotonic() - self._last_refresh)
+        if elapsed < 60:
+            txt = f"actualizado hace {elapsed}s"
+        elif elapsed < 3600:
+            txt = f"hace {elapsed // 60} min"
+        else:
+            txt = "hace > 1 h"
+        self.last_update_lbl.set_markup(f"<small><span alpha='50%'>{txt}</span></small>")
+        return True
+
     def refresh(self, up: bool, loaded: list[dict]) -> None:
+        self._last_refresh = time.monotonic()
         if up:
             n = len(loaded)
             if n:
@@ -673,7 +698,14 @@ class ModelsTab(Gtk.Box):
 
 
 class LogsTab(Gtk.Box):
-    """Live tail of journalctl -fu ollama, wrapped in a card for consistency."""
+    """Live tail of journalctl -fu ollama with filters (text + errors-only).
+
+    Architecture: we keep the raw stream in `self._lines` and render only the
+    matching subset into the TextView. New lines append both places; toggling
+    filters re-renders from the kept buffer (bounded to 5k lines).
+    """
+
+    ERROR_KEYWORDS = ("error", "warn", "critical", "fail", "panic")
 
     def __init__(self, app: "App"):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -687,18 +719,35 @@ class LogsTab(Gtk.Box):
             subtitle="journalctl -fu ollama · streaming en vivo · autoscroll",
         )
 
+        # — Toolbar: search + filters + actions —
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        bar.pack_start(Gtk.Box(), True, True, 0)  # spacer
-        bbottom = Gtk.Button(label="↓ ir al final")
-        bbottom.set_tooltip_text("Saltar al final del log")
+        self.search_entry = Gtk.Entry()
+        self.search_entry.set_placeholder_text("🔎  filtrar por texto…")
+        self.search_entry.set_tooltip_text(
+            "Muestra solo líneas que contengan este texto (case-insensitive)"
+        )
+        self.search_entry.connect("changed", lambda _w: self._rerender())
+        bar.pack_start(self.search_entry, True, True, 0)
+
+        self.errors_toggle = Gtk.ToggleButton(label="solo errores")
+        self.errors_toggle.set_tooltip_text(
+            "Filtrar a líneas con error / warning / critical / fail / panic"
+        )
+        self.errors_toggle.connect("toggled", lambda _w: self._rerender())
+        bar.pack_end(self.errors_toggle, False, False, 0)
+
+        bbottom = Gtk.Button(label="↓")
+        bbottom.set_tooltip_text("Saltar al final")
         bbottom.connect("clicked", lambda _: self._scroll_bottom())
-        bclear = Gtk.Button(label="Limpiar")
-        bclear.set_tooltip_text("Vacía el buffer en pantalla (no afecta al journal real)")
-        bclear.connect("clicked", lambda _: self.buf.set_text(""))
-        bar.pack_end(bclear, False, False, 0)
         bar.pack_end(bbottom, False, False, 0)
+
+        bclear = Gtk.Button(label="Limpiar")
+        bclear.set_tooltip_text("Vacía el buffer (no afecta al journal real)")
+        bclear.connect("clicked", lambda _: self._clear())
+        bar.pack_end(bclear, False, False, 0)
         content.pack_start(bar, False, False, 0)
 
+        # — TextView in a scroller —
         sw = Gtk.ScrolledWindow(vexpand=True)
         sw.set_min_content_height(280)
         self.view = Gtk.TextView(
@@ -709,14 +758,36 @@ class LogsTab(Gtk.Box):
         content.pack_start(sw, True, True, 0)
         outer.pack_start(frame, True, True, 0)
 
+        self._lines: list[str] = []  # raw lines kept (cap 5k)
         self.proc: subprocess.Popen | None = None
         self._start_tail()
+
+    # — filtering —
+    def _matches(self, line: str) -> bool:
+        ll = line.lower()
+        if (s := self.search_entry.get_text().strip().lower()) and s not in ll:
+            return False
+        if self.errors_toggle.get_active() and not any(k in ll for k in self.ERROR_KEYWORDS):
+            return False
+        return True
+
+    def _rerender(self) -> None:
+        self.buf.set_text("")
+        for line in self._lines:
+            if self._matches(line):
+                self.buf.insert(self.buf.get_end_iter(), line)
+        self._scroll_bottom()
+
+    def _clear(self) -> None:
+        self._lines = []
+        self.buf.set_text("")
 
     def _scroll_bottom(self) -> None:
         adj = self.view.get_vadjustment()
         if adj is not None:
             adj.set_value(adj.get_upper() - adj.get_page_size())
 
+    # — tail —
     def _start_tail(self) -> None:
         try:
             self.proc = subprocess.Popen(
@@ -737,19 +808,24 @@ class LogsTab(Gtk.Box):
             GLib.idle_add(self._append, line)
 
     def _append(self, line: str) -> bool:
-        end = self.buf.get_end_iter()
-        self.buf.insert(end, line)
-        mark = self.buf.create_mark(None, self.buf.get_end_iter(), False)
-        self.view.scroll_mark_onscreen(mark)
-        # cap at ~5000 lines so memory doesn't grow unbounded
-        if self.buf.get_line_count() > 5000:
+        self._lines.append(line)
+        if len(self._lines) > 5000:
+            self._lines = self._lines[-4000:]
+            # buffer gets the same haircut to stay in sync
             self.buf.delete(self.buf.get_start_iter(), self.buf.get_iter_at_line(1000))
+        if self._matches(line):
+            self.buf.insert(self.buf.get_end_iter(), line)
+            mark = self.buf.create_mark(None, self.buf.get_end_iter(), False)
+            self.view.scroll_mark_onscreen(mark)
         return False
 
 
 class IntegrationsTab(Gtk.Box):
-    """Each integration is rendered as a uniform "card". Long lists scroll
-    instead of cramping the window — adding more integrations later is cheap.
+    """Integrations grouped by category in collapsible expanders.
+
+    Each integration is still a uniform card; expanders bundle them by purpose
+    (Chat · Código · Imagen · …) so the tab stops growing endlessly downward
+    as we add more. Default state: every category open — collapse to taste.
     """
 
     def __init__(self, app: "App"):
@@ -758,9 +834,20 @@ class IntegrationsTab(Gtk.Box):
 
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=14)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=14)
         scrolled.add(outer)
         self.pack_start(scrolled, True, True, 0)
+
+        # Category containers — cards land here, then wrapped in expanders below.
+        cat_chat = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8, margin_start=6
+        )
+        cat_code = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8, margin_start=6
+        )
+        cat_image = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8, margin_start=6
+        )
 
         # — Open WebUI —
         self.btn_webui_install = Gtk.Button(label="Instalar (pipx)")
@@ -777,7 +864,7 @@ class IntegrationsTab(Gtk.Box):
         self.btn_webui_open = Gtk.Button(label="Abrir en navegador")
         self.btn_webui_open.connect("clicked", lambda _: webbrowser.open(OPEN_WEBUI))
         self.webui_status = Gtk.Label(xalign=0)
-        outer.pack_start(
+        cat_chat.pack_start(
             self._card(
                 "💬 Open WebUI",
                 "chat web con historial, memoria persistente y RAG (carga documentos)",
@@ -795,7 +882,7 @@ class IntegrationsTab(Gtk.Box):
         b2 = Gtk.Button(label="Web del proyecto")
         b2.connect("clicked", lambda _: webbrowser.open("https://opencode.ai"))
         self.opencode_status = Gtk.Label(xalign=0)
-        outer.pack_start(
+        cat_code.pack_start(
             self._card(
                 "⌨️ opencode",
                 "asistente de código en terminal",
@@ -823,7 +910,7 @@ class IntegrationsTab(Gtk.Box):
             ),
         )
         self.aider_status = Gtk.Label(xalign=0)
-        outer.pack_start(
+        cat_code.pack_start(
             self._card(
                 "🤝 Aider",
                 "pair programming con IA en terminal",
@@ -868,7 +955,7 @@ class IntegrationsTab(Gtk.Box):
         self.btn_comfy_open = Gtk.Button(label="Abrir en navegador")
         self.btn_comfy_open.connect("clicked", lambda _: webbrowser.open(COMFYUI_URL))
         self.comfyui_status = Gtk.Label(xalign=0)
-        outer.pack_start(
+        cat_image.pack_start(
             self._card(
                 "🎨 ComfyUI",
                 "generación de imagen local · SDXL, SD 1.5, Flux schnell",
@@ -880,7 +967,40 @@ class IntegrationsTab(Gtk.Box):
             0,
         )
 
+        # Wrap each category in its own collapsible expander
+        outer.pack_start(
+            self._category("chat-message-new-symbolic", "Chat y memoria", cat_chat),
+            False, False, 0,
+        )
+        outer.pack_start(
+            self._category("applications-development-symbolic", "Código", cat_code),
+            False, False, 0,
+        )
+        outer.pack_start(
+            self._category("applications-graphics-symbolic", "Imagen", cat_image),
+            False, False, 0,
+        )
+
         self.refresh()
+
+    def _category(self, icon_name: str, title: str, content: Gtk.Widget) -> Gtk.Expander:
+        """A collapsible group: icon · title (bold) → content below.
+
+        Uses a named system icon so it matches the user's theme (light/dark/HC)
+        instead of a fixed emoji. Expanded by default; user can fold to taste.
+        """
+        exp = Gtk.Expander()
+        exp.get_style_context().add_class("category")
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        img = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.LARGE_TOOLBAR)
+        head.pack_start(img, False, False, 0)
+        lbl = Gtk.Label(xalign=0)
+        lbl.set_markup(f"<big><b>{title}</b></big>")
+        head.pack_start(lbl, False, False, 0)
+        exp.set_label_widget(head)
+        exp.set_expanded(True)
+        exp.add(content)
+        return exp
 
     def _card(
         self,
@@ -1134,12 +1254,7 @@ class App:
         self.mi_off.connect(
             "activate", lambda _: self._do(lambda: systemctl("stop"), "Apagando…")
         )
-        mi_about.connect(
-            "activate",
-            lambda _: webbrowser.open(
-                "https://github.com/SebastianAlvarezGajardo/local-ai-control"
-            ),
-        )
+        mi_about.connect("activate", lambda _: self._show_about())
         mi_quit.connect("activate", lambda _: Gtk.main_quit())
 
         for it in (
@@ -1174,6 +1289,38 @@ class App:
     def _free_all(self) -> None:
         for m in loaded_models():
             stop_model(m.get("name") or m.get("model", ""))
+
+    def _show_about(self) -> None:
+        """Native GTK About dialog — title, version, license, links, credits."""
+        dlg = Gtk.AboutDialog(transient_for=self.window, modal=True)
+        dlg.set_program_name("local-ai-control")
+        dlg.set_version(VERSION)
+        dlg.set_comments(
+            "Tray + control panel GTK para tu IA local sobre Ollama.\n"
+            "Gestión, monitorización e integraciones — todo desde un sitio."
+        )
+        dlg.set_website("https://github.com/SebastianAlvarezGajardo/local-ai-control")
+        dlg.set_website_label("Repositorio en GitHub")
+        dlg.set_authors(["Sebastián Álvarez Gajardo"])
+        dlg.set_license_type(Gtk.License.MIT_X11)
+        dlg.set_logo_icon_name("computer")
+        dlg.set_copyright("© 2026 Sebastián Álvarez Gajardo")
+        # Acknowledge what we glue together — visible under "Credits"
+        dlg.add_credit_section(
+            "Construido sobre",
+            ["Ollama — github.com/ollama/ollama", "GTK 3 + PyGObject", "AppIndicator (Ayatana)"],
+        )
+        dlg.add_credit_section(
+            "Integraciones soportadas",
+            [
+                "Open WebUI — github.com/open-webui/open-webui",
+                "ComfyUI — github.com/comfyanonymous/ComfyUI",
+                "opencode — opencode.ai",
+                "Aider — aider.chat",
+            ],
+        )
+        dlg.run()
+        dlg.destroy()
 
     def refresh(self) -> bool:
         up = service_up()
