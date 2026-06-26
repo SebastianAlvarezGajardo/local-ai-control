@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -37,7 +38,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.5.3"
+VERSION = "0.6.0"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -944,6 +945,8 @@ class IntegrationsTab(Gtk.Box):
         self.btn_webui_start.connect("clicked", self._toggle_webui)
         self.btn_webui_open = Gtk.Button(label="Abrir en navegador")
         self.btn_webui_open.connect("clicked", lambda _: webbrowser.open(OPEN_WEBUI))
+        # so set_visible() actually sticks past show_all() — see refresh()
+        self.btn_webui_install.set_no_show_all(True)
         self.webui_status = Gtk.Label(xalign=0)
         cat_chat.pack_start(
             self._card(
@@ -958,17 +961,21 @@ class IntegrationsTab(Gtk.Box):
         )
 
         # — opencode —
-        b1 = Gtk.Button(label="Lanzar")
-        b1.connect("clicked", lambda _: open_terminal("opencode"))
-        b2 = Gtk.Button(label="Web del proyecto")
-        b2.connect("clicked", lambda _: webbrowser.open("https://opencode.ai"))
+        self.btn_oc_launch = Gtk.Button(label="💻 Lanzar en carpeta…")
+        self.btn_oc_launch.set_tooltip_text(
+            "Elige una carpeta de proyecto. Se abre un terminal en ella con opencode listo."
+        )
+        self.btn_oc_launch.connect("clicked", self._launch_opencode)
+        self.btn_oc_docs = Gtk.Button(label="Docs")
+        self.btn_oc_docs.set_tooltip_text("Abre opencode.ai en el navegador")
+        self.btn_oc_docs.connect("clicked", lambda _: webbrowser.open("https://opencode.ai"))
         self.opencode_status = Gtk.Label(xalign=0)
         cat_code.pack_start(
             self._card(
                 "⌨️ opencode",
                 "asistente de código en terminal",
                 self.opencode_status,
-                [b1, b2],
+                [self.btn_oc_launch, self.btn_oc_docs],
             ),
             False,
             False,
@@ -976,27 +983,26 @@ class IntegrationsTab(Gtk.Box):
         )
 
         # — Aider —
-        ai_install = Gtk.Button(label="Instalar (pipx)")
-        ai_install.connect(
+        self.btn_aider_install = Gtk.Button(label="Instalar (pipx)")
+        self.btn_aider_install.connect(
             "clicked",
             lambda _: open_terminal(
                 "(command -v pipx >/dev/null || (sudo apt update && sudo apt install -y pipx && pipx ensurepath)) && pipx install aider-chat"
             ),
         )
-        ai_launch = Gtk.Button(label="Lanzar con qwen2.5-coder")
-        ai_launch.connect(
-            "clicked",
-            lambda _: open_terminal(
-                "aider --model ollama_chat/qwen2.5-coder:7b --no-show-model-warnings"
-            ),
+        self.btn_aider_launch = Gtk.Button(label="💻 Lanzar en carpeta…")
+        self.btn_aider_launch.set_tooltip_text(
+            "Elige una carpeta de proyecto. Se abre un terminal en ella con aider + qwen2.5-coder."
         )
+        self.btn_aider_launch.connect("clicked", self._launch_aider)
+        self.btn_aider_install.set_no_show_all(True)
         self.aider_status = Gtk.Label(xalign=0)
         cat_code.pack_start(
             self._card(
                 "🤝 Aider",
                 "pair programming con IA en terminal",
                 self.aider_status,
-                [ai_install, ai_launch],
+                [self.btn_aider_install, self.btn_aider_launch],
             ),
             False,
             False,
@@ -1048,6 +1054,7 @@ class IntegrationsTab(Gtk.Box):
         self.btn_comfy_start.connect("clicked", self._toggle_comfyui)
         self.btn_comfy_open = Gtk.Button(label="Abrir en navegador")
         self.btn_comfy_open.connect("clicked", lambda _: webbrowser.open(COMFYUI_URL))
+        self.btn_comfy_install.set_no_show_all(True)
         self.comfyui_status = Gtk.Label(xalign=0)
         cat_image.pack_start(
             self._card(
@@ -1061,21 +1068,60 @@ class IntegrationsTab(Gtk.Box):
             0,
         )
 
-        # Wrap each category in its own collapsible expander
+        # Wrap each category in its own collapsible expander.
+        # Default: only "Chat y memoria" expanded — the rest collapse to one
+        # line so the tab fits in one screen. Click to expand on demand.
         outer.pack_start(
-            self._category("chat-message-new-symbolic", "Chat y memoria", cat_chat),
+            self._category(
+                "chat-message-new-symbolic", "Chat y memoria", cat_chat, expanded=True
+            ),
             False, False, 0,
         )
         outer.pack_start(
-            self._category("applications-development-symbolic", "Código", cat_code),
+            self._category(
+                "applications-development-symbolic", "Código", cat_code, expanded=False
+            ),
             False, False, 0,
         )
         outer.pack_start(
-            self._category("applications-graphics-symbolic", "Imagen", cat_image),
+            self._category(
+                "applications-graphics-symbolic", "Imagen", cat_image, expanded=False
+            ),
             False, False, 0,
         )
 
         self.refresh()
+
+    def _pick_folder(self, title: str) -> str | None:
+        """Open a GTK folder picker centered on our window. Returns path or None."""
+        dlg = Gtk.FileChooserDialog(
+            title=title,
+            transient_for=self.app.window,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dlg.add_buttons(
+            "Cancelar", Gtk.ResponseType.CANCEL,
+            "Abrir aquí", Gtk.ResponseType.ACCEPT,
+        )
+        dlg.set_local_only(True)
+        dlg.set_current_folder(os.path.expanduser("~"))
+        response = dlg.run()
+        chosen = dlg.get_filename() if response == Gtk.ResponseType.ACCEPT else None
+        dlg.destroy()
+        return chosen
+
+    def _launch_opencode(self, _w: Gtk.Button) -> None:
+        folder = self._pick_folder("Carpeta de proyecto para opencode")
+        if folder:
+            open_terminal(f"cd {shlex.quote(folder)} && opencode")
+
+    def _launch_aider(self, _w: Gtk.Button) -> None:
+        folder = self._pick_folder("Carpeta de proyecto para Aider")
+        if folder:
+            open_terminal(
+                f"cd {shlex.quote(folder)} && "
+                "aider --model ollama_chat/qwen2.5-coder:7b --no-show-model-warnings"
+            )
 
     def _toggle_webui(self, _w: Gtk.Button) -> None:
         """One button to rule both: start if stopped, stop if running."""
@@ -1094,11 +1140,19 @@ class IntegrationsTab(Gtk.Box):
         else:
             open_terminal(self._comfy_start_cmd)
 
-    def _category(self, icon_name: str, title: str, content: Gtk.Widget) -> Gtk.Expander:
+    def _category(
+        self,
+        icon_name: str,
+        title: str,
+        content: Gtk.Widget,
+        expanded: bool = False,
+    ) -> Gtk.Expander:
         """A collapsible group: icon · title (bold) → content below.
 
         Uses a named system icon so it matches the user's theme (light/dark/HC)
-        instead of a fixed emoji. Expanded by default; user can fold to taste.
+        instead of a fixed emoji. Caller chooses default expand state — we
+        keep "Chat y memoria" open and the rest collapsed so the tab fits
+        in one screen by default.
         """
         exp = Gtk.Expander()
         exp.get_style_context().add_class("category")
@@ -1109,7 +1163,7 @@ class IntegrationsTab(Gtk.Box):
         lbl.set_markup(f"<big><b>{title}</b></big>")
         head.pack_start(lbl, False, False, 0)
         exp.set_label_widget(head)
-        exp.set_expanded(True)
+        exp.set_expanded(expanded)
         exp.add(content)
         return exp
 
@@ -1120,12 +1174,16 @@ class IntegrationsTab(Gtk.Box):
         status_widget: Gtk.Label,
         buttons: list[Gtk.Button],
     ) -> Gtk.Frame:
-        """A consistent 'integration card': title · subtitle · status · buttons."""
+        """A consistent 'integration card': title · subtitle · status · buttons.
+
+        Compact margin (10) inside the expander parent — total padding stays
+        readable but the tab doesn't feel like it eats the whole screen.
+        """
         frame = Gtk.Frame()
         frame.set_shadow_type(Gtk.ShadowType.NONE)
         frame.get_style_context().add_class("card")
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=14)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=10)
 
         t = Gtk.Label(xalign=0)
         t.set_markup(f"<big><b>{title}</b></big>")
@@ -1137,9 +1195,10 @@ class IntegrationsTab(Gtk.Box):
 
         status_widget.set_xalign(0)
         status_widget.set_line_wrap(True)
-        box.pack_start(status_widget, False, False, 4)
+        box.pack_start(status_widget, False, False, 2)
 
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btns.set_no_show_all(False)
         for b in buttons:
             btns.pack_start(b, True, True, 0)
         box.pack_start(btns, False, False, 0)
@@ -1165,25 +1224,35 @@ class IntegrationsTab(Gtk.Box):
             else:
                 self.webui_status.set_markup("✅ instalado · 🔴 parado")
                 self.btn_webui_start.set_label("Iniciar servicio")
-            self.btn_webui_install.set_sensitive(False)
+            self.btn_webui_install.set_visible(False)  # ya está, fuera ruido
             self.btn_webui_start.set_sensitive(True)
             self.btn_webui_open.set_sensitive(bool(http_ok))
         else:
             self.webui_status.set_markup("❌ no instalado")
             self.btn_webui_start.set_label("Iniciar servicio")
+            self.btn_webui_install.set_visible(True)
             self.btn_webui_install.set_sensitive(True)
             self.btn_webui_start.set_sensitive(False)
             self.btn_webui_open.set_sensitive(False)
 
         # ── opencode / Aider (no son servicios persistentes — solo "instalado") ──
+        # Cuando ya están instalados ocultamos el botón Install para que el
+        # único call-to-action visible sea "Lanzar en carpeta…" → 2 clicks
+        # y la tool está usable.
+        oc_installed = bool(find_binary("opencode"))
         self.opencode_status.set_markup(
             "✅ instalado"
-            if find_binary("opencode")
+            if oc_installed
             else "❌ no instalado · <tt>curl -fsSL https://opencode.ai/install | bash</tt>"
         )
+        self.btn_oc_launch.set_sensitive(oc_installed)
+
+        aider_installed = bool(find_binary("aider"))
         self.aider_status.set_markup(
-            "✅ instalado" if find_binary("aider") else "❌ no instalado"
+            "✅ instalado" if aider_installed else "❌ no instalado · pulsa Instalar (pipx)"
         )
+        self.btn_aider_install.set_visible(not aider_installed)
+        self.btn_aider_launch.set_sensitive(aider_installed)
 
         # ── ComfyUI ──
         if comfyui_installed():
@@ -1202,7 +1271,7 @@ class IntegrationsTab(Gtk.Box):
             else:
                 self.comfyui_status.set_markup("✅ instalado · 🔴 parado")
                 self.btn_comfy_start.set_label("Iniciar servicio")
-            self.btn_comfy_install.set_sensitive(False)
+            self.btn_comfy_install.set_visible(False)  # ya está
             self.btn_comfy_start.set_sensitive(True)
             self.btn_comfy_open.set_sensitive(bool(http_ok))
         else:
@@ -1210,6 +1279,7 @@ class IntegrationsTab(Gtk.Box):
                 "❌ no instalado · pesa ~10 GB con dependencias + un modelo"
             )
             self.btn_comfy_start.set_label("Iniciar servicio")
+            self.btn_comfy_install.set_visible(True)
             self.btn_comfy_install.set_sensitive(True)
             self.btn_comfy_start.set_sensitive(False)
             self.btn_comfy_open.set_sensitive(False)
