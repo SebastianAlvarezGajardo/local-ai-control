@@ -36,7 +36,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -956,7 +956,11 @@ class IntegrationsTab(Gtk.Box):
             "python3 -m venv venv && "
             "source venv/bin/activate && "
             "pip install --upgrade pip && "
-            "pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 && "
+            # IMPORTANT: install torch + torchvision + torchaudio together from
+            # the ROCm index, otherwise requirements.txt pulls a CUDA-built
+            # torchaudio from PyPI and ComfyUI fails on import with
+            # 'libcudart.so.13: cannot open shared object file'.
+            "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2 && "
             "pip install -r requirements.txt && "
             "echo && echo '✅ ComfyUI instalado.' && "
             "echo && "
