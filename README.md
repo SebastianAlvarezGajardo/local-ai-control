@@ -66,6 +66,17 @@ cd local-ai-control
 - Paquetes del sistema: `python3-gi`, `gir1.2-gtk-3.0`, `gir1.2-ayatanaappindicator3-0.1`, `pkexec`, `notify-send`.
 - Extensión GNOME **AppIndicator** activa (suele venir por defecto en Ubuntu GNOME).
 
+#### GPU AMD: añadir tu usuario a los grupos `render` y `video`
+
+Las apps que usan la GPU desde tu usuario (p. ej. **ComfyUI** lanzado desde el panel) necesitan poder abrir `/dev/kfd`. Por defecto solo lo pueden hacer miembros del grupo `render`. El servicio systemd de Ollama corre como user `ollama` (ya añadido por el instalador), pero ComfyUI lo lanzas tú. Si te falla con `RuntimeError: No HIP GPUs are available`, esta es la pieza que falta:
+
+```bash
+sudo usermod -aG render,video $USER
+# después cierra sesión gráfica y vuelve a entrar para que tome efecto
+```
+
+Verificar tras volver a entrar: `groups | grep -E 'render|video'` debe mostrar ambos.
+
 En Ubuntu, instala lo que falte con:
 
 ```bash

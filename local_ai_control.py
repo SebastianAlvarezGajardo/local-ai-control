@@ -36,7 +36,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -216,8 +216,31 @@ def ollama_proc_rss() -> int:
         return 0
 
 
+def find_binary(name: str, extra_dirs: list[str] | None = None) -> str | None:
+    """Find an executable by name — robust against autostart PATH gotchas.
+
+    GNOME autostart entries don't get the user's interactive-shell PATH
+    (no `.bashrc` is sourced for non-shell processes), so binaries that
+    live under `~/.local/bin` or `~/.<tool>/bin` are often invisible to
+    `shutil.which()`. We try PATH first and fall back to a curated list
+    of common per-user install dirs plus any caller-provided ones.
+    """
+    if hit := shutil.which(name):
+        return hit
+    candidates: list[str] = [
+        os.path.expanduser(f"~/.local/bin/{name}"),
+        os.path.expanduser(f"~/.{name}/bin/{name}"),  # e.g. ~/.opencode/bin/opencode
+    ]
+    if extra_dirs:
+        candidates += [os.path.join(os.path.expanduser(d), name) for d in extra_dirs]
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
 def webui_installed() -> bool:
-    return shutil.which("open-webui") is not None
+    return find_binary("open-webui") is not None
 
 
 def webui_running() -> bool:
@@ -945,8 +968,16 @@ class IntegrationsTab(Gtk.Box):
             "echo && "
             "echo 'Cuando tengas un .safetensors ahí, vuelve al panel y pulsa \"Iniciar servicio\".'"
         )
+        # HSA_OVERRIDE_GFX_VERSION ayuda a que PyTorch ROCm reconozca GPUs
+        # AMD relativamente nuevas que aún no están listadas explícitamente
+        # en algunos wheels (Navi 33 / gfx1102 es el caso típico). Inofensivo
+        # en otros casos. Si tu user no está en los grupos render/video la
+        # GPU sigue siendo inaccesible — esto NO lo arregla. Documentado
+        # en el README.
         comfy_start_cmd = (
-            f"cd {COMFYUI_DIR} && source venv/bin/activate && python main.py --listen"
+            f"cd {COMFYUI_DIR} && "
+            "source venv/bin/activate && "
+            "HSA_OVERRIDE_GFX_VERSION=11.0.0 python main.py --listen"
         )
         self.btn_comfy_install = Gtk.Button(label="Instalar")
         self.btn_comfy_install.connect("clicked", lambda _: open_terminal(comfy_install_cmd))
@@ -1053,11 +1084,11 @@ class IntegrationsTab(Gtk.Box):
 
         self.opencode_status.set_markup(
             "✅ instalado"
-            if shutil.which("opencode")
+            if find_binary("opencode")
             else "❌ no instalado · <tt>curl -fsSL https://opencode.ai/install | bash</tt>"
         )
         self.aider_status.set_markup(
-            "✅ instalado" if shutil.which("aider") else "❌ no instalado"
+            "✅ instalado" if find_binary("aider") else "❌ no instalado"
         )
 
         if comfyui_installed():
