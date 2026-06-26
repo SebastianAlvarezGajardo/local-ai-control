@@ -31,11 +31,11 @@ try:
 except (ValueError, ImportError):
     gi.require_version("AppIndicator3", "0.1")
     from gi.repository import AppIndicator3  # type: ignore[no-redef]
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -245,6 +245,49 @@ def human_size(b: float) -> str:
             return f"{b:.1f} {u}"
         b /= 1024
     return f"{b:.1f} PB"
+
+
+# ── UI: theme ─────────────────────────────────────────────────────────────
+def _install_css() -> None:
+    """Apply a small CSS so the whole app feels consistent and not crammed.
+
+    Uses `currentColor` based alpha so we play nicely with both light and
+    dark GTK themes. Cards get a subtle border + rounded corners; buttons
+    and progress bars match the same radius. Hover gently lifts the card.
+    """
+    css = b"""
+    frame.card {
+        border: 1px solid alpha(currentColor, 0.18);
+        border-radius: 10px;
+        background-color: alpha(currentColor, 0.035);
+        padding: 0;
+    }
+    frame.card:hover {
+        background-color: alpha(currentColor, 0.07);
+    }
+    button {
+        border-radius: 7px;
+        padding: 4px 12px;
+    }
+    progressbar trough,
+    progressbar progress {
+        border-radius: 6px;
+        min-height: 6px;
+    }
+    notebook > header > tabs > tab {
+        padding: 6px 14px;
+    }
+    .dim {
+        opacity: 0.65;
+    }
+    """
+    provider = Gtk.CssProvider()
+    provider.load_from_data(css)
+    screen = Gdk.Screen.get_default()
+    if screen is not None:
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
 
 # ── UI: tabs ──────────────────────────────────────────────────────────────
@@ -549,15 +592,21 @@ class LogsTab(Gtk.Box):
 
 
 class IntegrationsTab(Gtk.Box):
+    """Each integration is rendered as a uniform "card". Long lists scroll
+    instead of cramping the window — adding more integrations later is cheap.
+    """
+
     def __init__(self, app: "App"):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin=14)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.app = app
 
+        scrolled = Gtk.ScrolledWindow(vexpand=True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=14)
+        scrolled.add(outer)
+        self.pack_start(scrolled, True, True, 0)
+
         # — Open WebUI —
-        self._section_title("Open WebUI", "chat web con historial, memoria y RAG")
-        self.webui_status = Gtk.Label(xalign=0)
-        self.pack_start(self.webui_status, False, False, 0)
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.btn_webui_install = Gtk.Button(label="Instalar (pipx)")
         self.btn_webui_install.connect(
             "clicked",
@@ -568,33 +617,41 @@ class IntegrationsTab(Gtk.Box):
             ),
         )
         self.btn_webui_start = Gtk.Button(label="Iniciar servicio")
-        self.btn_webui_start.connect(
-            "clicked", lambda _: open_terminal("open-webui serve")
-        )
+        self.btn_webui_start.connect("clicked", lambda _: open_terminal("open-webui serve"))
         self.btn_webui_open = Gtk.Button(label="Abrir en navegador")
         self.btn_webui_open.connect("clicked", lambda _: webbrowser.open(OPEN_WEBUI))
-        for b in (self.btn_webui_install, self.btn_webui_start, self.btn_webui_open):
-            row.pack_start(b, True, True, 0)
-        self.pack_start(row, False, False, 0)
+        self.webui_status = Gtk.Label(xalign=0)
+        outer.pack_start(
+            self._card(
+                "💬 Open WebUI",
+                "chat web con historial, memoria persistente y RAG (carga documentos)",
+                self.webui_status,
+                [self.btn_webui_install, self.btn_webui_start, self.btn_webui_open],
+            ),
+            False,
+            False,
+            0,
+        )
 
         # — opencode —
-        self._section_title("opencode", "asistente de código en terminal", top=12)
-        self.opencode_status = Gtk.Label(xalign=0)
-        self.pack_start(self.opencode_status, False, False, 0)
-        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         b1 = Gtk.Button(label="Lanzar")
         b1.connect("clicked", lambda _: open_terminal("opencode"))
         b2 = Gtk.Button(label="Web del proyecto")
         b2.connect("clicked", lambda _: webbrowser.open("https://opencode.ai"))
-        row2.pack_start(b1, True, True, 0)
-        row2.pack_start(b2, True, True, 0)
-        self.pack_start(row2, False, False, 0)
+        self.opencode_status = Gtk.Label(xalign=0)
+        outer.pack_start(
+            self._card(
+                "⌨️ opencode",
+                "asistente de código en terminal",
+                self.opencode_status,
+                [b1, b2],
+            ),
+            False,
+            False,
+            0,
+        )
 
         # — Aider —
-        self._section_title("Aider", "pair programming con IA en terminal", top=12)
-        self.aider_status = Gtk.Label(xalign=0)
-        self.pack_start(self.aider_status, False, False, 0)
-        row3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         ai_install = Gtk.Button(label="Instalar (pipx)")
         ai_install.connect(
             "clicked",
@@ -609,19 +666,20 @@ class IntegrationsTab(Gtk.Box):
                 "aider --model ollama_chat/qwen2.5-coder:7b --no-show-model-warnings"
             ),
         )
-        row3.pack_start(ai_install, True, True, 0)
-        row3.pack_start(ai_launch, True, True, 0)
-        self.pack_start(row3, False, False, 0)
-
-        # — ComfyUI (generación de imagen) —
-        self._section_title(
-            "ComfyUI",
-            "generación de imagen local · SDXL, SD 1.5, Flux schnell",
-            top=12,
+        self.aider_status = Gtk.Label(xalign=0)
+        outer.pack_start(
+            self._card(
+                "🤝 Aider",
+                "pair programming con IA en terminal",
+                self.aider_status,
+                [ai_install, ai_launch],
+            ),
+            False,
+            False,
+            0,
         )
-        self.comfyui_status = Gtk.Label(xalign=0)
-        self.pack_start(self.comfyui_status, False, False, 0)
 
+        # — ComfyUI —
         comfy_install_cmd = (
             "set -e && "
             "echo '── Instalando ComfyUI con PyTorch ROCm para tu Radeon ──' && "
@@ -645,28 +703,62 @@ class IntegrationsTab(Gtk.Box):
             "echo 'Cuando tengas un .safetensors ahí, vuelve al panel y pulsa \"Iniciar servicio\".'"
         )
         comfy_start_cmd = (
-            f"cd {COMFYUI_DIR} && "
-            "source venv/bin/activate && "
-            "python main.py --listen"
+            f"cd {COMFYUI_DIR} && source venv/bin/activate && python main.py --listen"
         )
-
-        row4 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.btn_comfy_install = Gtk.Button(label="Instalar")
         self.btn_comfy_install.connect("clicked", lambda _: open_terminal(comfy_install_cmd))
         self.btn_comfy_start = Gtk.Button(label="Iniciar servicio")
         self.btn_comfy_start.connect("clicked", lambda _: open_terminal(comfy_start_cmd))
         self.btn_comfy_open = Gtk.Button(label="Abrir en navegador")
         self.btn_comfy_open.connect("clicked", lambda _: webbrowser.open(COMFYUI_URL))
-        for b in (self.btn_comfy_install, self.btn_comfy_start, self.btn_comfy_open):
-            row4.pack_start(b, True, True, 0)
-        self.pack_start(row4, False, False, 0)
+        self.comfyui_status = Gtk.Label(xalign=0)
+        outer.pack_start(
+            self._card(
+                "🎨 ComfyUI",
+                "generación de imagen local · SDXL, SD 1.5, Flux schnell",
+                self.comfyui_status,
+                [self.btn_comfy_install, self.btn_comfy_start, self.btn_comfy_open],
+            ),
+            False,
+            False,
+            0,
+        )
 
         self.refresh()
 
-    def _section_title(self, title: str, subtitle: str, top: int = 0) -> None:
-        h = Gtk.Label(xalign=0)
-        h.set_markup(f"<big><b>{title}</b></big>  —  <span alpha='75%'>{subtitle}</span>")
-        self.pack_start(h, False, False, top)
+    def _card(
+        self,
+        title: str,
+        subtitle: str,
+        status_widget: Gtk.Label,
+        buttons: list[Gtk.Button],
+    ) -> Gtk.Frame:
+        """A consistent 'integration card': title · subtitle · status · buttons."""
+        frame = Gtk.Frame()
+        frame.set_shadow_type(Gtk.ShadowType.NONE)
+        frame.get_style_context().add_class("card")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=14)
+
+        t = Gtk.Label(xalign=0)
+        t.set_markup(f"<big><b>{title}</b></big>")
+        box.pack_start(t, False, False, 0)
+
+        s = Gtk.Label(xalign=0, wrap=True)
+        s.set_markup(f"<span alpha='65%'>{subtitle}</span>")
+        box.pack_start(s, False, False, 0)
+
+        status_widget.set_xalign(0)
+        status_widget.set_line_wrap(True)
+        box.pack_start(status_widget, False, False, 4)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for b in buttons:
+            btns.pack_start(b, True, True, 0)
+        box.pack_start(btns, False, False, 0)
+
+        frame.add(box)
+        return frame
 
     def refresh(self) -> None:
         if webui_installed():
@@ -744,11 +836,13 @@ class ProfilesTab(Gtk.Box):
 
     def _card(self, title: str, desc: str, fn) -> Gtk.Frame:
         frame = Gtk.Frame()
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=10)
+        frame.set_shadow_type(Gtk.ShadowType.NONE)
+        frame.get_style_context().add_class("card")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=14)
         t = Gtk.Label(xalign=0)
         t.set_markup(f"<big><b>{title}</b></big>")
         d = Gtk.Label(xalign=0, wrap=True)
-        d.set_text(desc)
+        d.set_markup(f"<span alpha='65%'>{desc}</span>")
         b = Gtk.Button(label="Activar")
         b.connect("clicked", lambda _w: self.app._do(fn, f"Activando {title}…"))
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -852,6 +946,7 @@ class ControlWindow(Gtk.Window):
 
 class App:
     def __init__(self) -> None:
+        _install_css()
         self.ind = AppIndicator3.Indicator.new(
             APP_NAME, "computer-fail", AppIndicator3.IndicatorCategory.APPLICATION_STATUS
         )
