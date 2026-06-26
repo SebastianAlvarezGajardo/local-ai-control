@@ -35,7 +35,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -255,6 +255,10 @@ def _install_css() -> None:
     dark GTK themes. Cards get a subtle border + rounded corners; buttons
     and progress bars match the same radius. Hover gently lifts the card.
     """
+    # IMPORTANT: every selector is scoped to `.card` descendants. Earlier
+    # versions used bare `button { … }` and accidentally restyled the window
+    # title-bar buttons (close/min/max). Lesson: never style generic widgets
+    # globally in a GTK app you don't own end-to-end.
     css = b"""
     frame.card {
         border: 1px solid alpha(currentColor, 0.18);
@@ -265,20 +269,17 @@ def _install_css() -> None:
     frame.card:hover {
         background-color: alpha(currentColor, 0.07);
     }
-    button {
+    frame.card button {
         border-radius: 7px;
         padding: 4px 12px;
     }
-    progressbar trough,
-    progressbar progress {
+    frame.card progressbar trough,
+    frame.card progressbar progress {
         border-radius: 6px;
         min-height: 6px;
     }
     notebook > header > tabs > tab {
         padding: 6px 14px;
-    }
-    .dim {
-        opacity: 0.65;
     }
     """
     provider = Gtk.CssProvider()
@@ -290,82 +291,269 @@ def _install_css() -> None:
         )
 
 
+# ── UI: helpers ───────────────────────────────────────────────────────────
+def make_card(
+    title: str | None = None, subtitle: str | None = None
+) -> tuple[Gtk.Frame, Gtk.Box]:
+    """Return (frame, content_box). Pack your widgets into content_box.
+
+    Provides the visual chrome used everywhere: a `.card` Frame with title,
+    optional dim subtitle, and a vertical content area. One single styling
+    contract across the whole app — change CSS once, everything reflows.
+    """
+    frame = Gtk.Frame()
+    frame.set_shadow_type(Gtk.ShadowType.NONE)
+    frame.get_style_context().add_class("card")
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+    if title is not None:
+        t = Gtk.Label(xalign=0)
+        t.set_markup(f"<big><b>{title}</b></big>")
+        outer.pack_start(t, False, False, 0)
+    if subtitle is not None:
+        s = Gtk.Label(xalign=0, wrap=True)
+        s.set_markup(f"<span alpha='65%'>{subtitle}</span>")
+        outer.pack_start(s, False, False, 0)
+
+    content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    outer.pack_start(content, True, True, 0)
+    frame.add(outer)
+    return frame, content
+
+
+def model_row(
+    name: str,
+    size_human: str,
+    extra: str = "",
+    buttons: list[Gtk.Button] | None = None,
+) -> Gtk.Box:
+    """A compact model line: 📦 <b>name</b> · size · extra   [buttons →]"""
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    info = Gtk.Label(xalign=0, wrap=True)
+    tail = f"  <span alpha='65%'>· {size_human}{extra}</span>"
+    info.set_markup(f"📦 <b>{name}</b>{tail}")
+    row.pack_start(info, True, True, 0)
+    if buttons:
+        for b in buttons:
+            row.pack_end(b, False, False, 0)
+    return row
+
+
+def empty_state(text: str) -> Gtk.Label:
+    """Friendly placeholder for empty lists."""
+    lbl = Gtk.Label(xalign=0)
+    lbl.set_markup(f"<span alpha='50%'>{text}</span>")
+    return lbl
+
+
 # ── UI: tabs ──────────────────────────────────────────────────────────────
-class StatusTab(Gtk.Box):
+class DashboardTab(Gtk.Box):
+    """Landing tab: state + actions + resources + loaded models, all in one.
+
+    Replaces the old StatusTab + StatsTab — fewer clicks to see what matters.
+    """
+
     def __init__(self, app: "App"):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.app = app
-        self.status_lbl = Gtk.Label(xalign=0)
-        self.status_lbl.set_markup("<big>…</big>")
-        self.pack_start(self.status_lbl, False, False, 0)
+
+        scrolled = Gtk.ScrolledWindow(vexpand=True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=14)
+        scrolled.add(outer)
+        self.pack_start(scrolled, True, True, 0)
+
+        # — Hero: state + actions in one card —
+        hero_frame, hero_box = make_card()
+        hero_box.set_spacing(12)
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.hero_emoji = Gtk.Label()
+        self.hero_emoji.set_markup("<span size='30000'>⏳</span>")
+        head.pack_start(self.hero_emoji, False, False, 0)
+        head_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.hero_state = Gtk.Label(xalign=0)
+        self.hero_state.set_markup("<big><b>cargando…</b></big>")
+        self.hero_summary = Gtk.Label(xalign=0, wrap=True)
+        head_text.pack_start(self.hero_state, False, False, 0)
+        head_text.pack_start(self.hero_summary, False, False, 0)
+        head.pack_start(head_text, True, True, 0)
+        hero_box.pack_start(head, False, False, 0)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.btn_on = Gtk.Button(label="🟢 Encender")
+        self.btn_on.set_tooltip_text("Arranca el servicio Ollama (systemd)")
         self.btn_off = Gtk.Button(label="🔴 Apagar")
+        self.btn_off.set_tooltip_text("Detiene el servicio Ollama por completo")
         self.btn_free = Gtk.Button(label="🎮 Liberar VRAM")
-        self.btn_on.connect("clicked", lambda _: app._do(lambda: systemctl("start"), "Encendiendo…"))
-        self.btn_off.connect("clicked", lambda _: app._do(lambda: systemctl("stop"), "Apagando…"))
-        self.btn_free.connect("clicked", lambda _: app._do(app._free_all, "Liberando VRAM…"))
+        self.btn_free.set_tooltip_text(
+            "Descarga todos los modelos en memoria. La GPU vuelve a estar libre "
+            "para juegos o edición de vídeo. El servicio sigue activo."
+        )
+        self.btn_on.connect(
+            "clicked", lambda _: app._do(lambda: systemctl("start"), "Encendiendo…")
+        )
+        self.btn_off.connect(
+            "clicked", lambda _: app._do(lambda: systemctl("stop"), "Apagando…")
+        )
+        self.btn_free.connect(
+            "clicked", lambda _: app._do(app._free_all, "Liberando VRAM…")
+        )
         for b in (self.btn_on, self.btn_off, self.btn_free):
             actions.pack_start(b, True, True, 0)
-        self.pack_start(actions, False, False, 0)
+        hero_box.pack_start(actions, False, False, 0)
+        outer.pack_start(hero_frame, False, False, 0)
 
-        self._header("Modelos cargados ahora mismo")
-        self.loaded_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.pack_start(self.loaded_box, False, False, 0)
+        # — Recursos: GPU + Sistema en fila (2 columnas) —
+        res_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
 
-    def _header(self, t: str) -> None:
-        lbl = Gtk.Label(xalign=0)
-        lbl.set_markup(f"<b>{t}</b>")
-        self.pack_start(lbl, False, False, 4)
+        gpu_frame, gpu_box = make_card("GPU", subtitle="Memoria y carga gráfica")
+        self.gpu_summary = Gtk.Label(xalign=0)
+        gpu_box.pack_start(self.gpu_summary, False, False, 0)
+        self.vram_bar = Gtk.ProgressBar(show_text=True)
+        gpu_box.pack_start(self.vram_bar, False, False, 0)
+        self.busy_bar = Gtk.ProgressBar(show_text=True)
+        gpu_box.pack_start(self.busy_bar, False, False, 0)
+        res_row.pack_start(gpu_frame, True, True, 0)
+
+        sys_frame, sys_box = make_card("Sistema", subtitle="RAM, CPU y proceso Ollama")
+        self.ram_bar = Gtk.ProgressBar(show_text=True)
+        sys_box.pack_start(self.ram_bar, False, False, 0)
+        self.cpu_lbl = Gtk.Label(xalign=0)
+        sys_box.pack_start(self.cpu_lbl, False, False, 0)
+        self.ollama_lbl = Gtk.Label(xalign=0)
+        sys_box.pack_start(self.ollama_lbl, False, False, 0)
+        res_row.pack_start(sys_frame, True, True, 0)
+
+        outer.pack_start(res_row, False, False, 0)
+
+        # — Modelos cargados (en VRAM/RAM ahora) —
+        ld_frame, ld_box = make_card(
+            "Modelos cargados ahora mismo",
+            subtitle="Lo que tienes ocupando RAM/VRAM en este momento",
+        )
+        self.loaded_box = ld_box
+        outer.pack_start(ld_frame, False, False, 0)
+
+        GLib.timeout_add(STATS_REFRESH_MS, self._stats_tick)
+        self._stats_tick()
 
     def refresh(self, up: bool, loaded: list[dict]) -> None:
         if up:
             n = len(loaded)
-            self.status_lbl.set_markup(
-                f"<big>🟢 <b>Encendida</b></big>  ·  {n} modelo(s) cargado(s)"
-                if n
-                else "<big>🟡 <b>Encendida en reposo</b></big>  ·  0 VRAM ocupada"
-            )
+            if n:
+                self.hero_emoji.set_markup("<span size='30000'>🟢</span>")
+                self.hero_state.set_markup("<big><b>Encendida</b></big>")
+                names = " · ".join(
+                    m.get("name") or m.get("model", "?") for m in loaded[:3]
+                )
+                more = f" (+{n - 3})" if n > 3 else ""
+                self.hero_summary.set_markup(
+                    f"<span alpha='65%'>{n} modelo(s) cargado(s):  {names}{more}</span>"
+                )
+            else:
+                self.hero_emoji.set_markup("<span size='30000'>🟡</span>")
+                self.hero_state.set_markup("<big><b>En reposo</b></big>")
+                self.hero_summary.set_markup(
+                    "<span alpha='65%'>Servicio activo, sin modelos en VRAM (consumo ~0)</span>"
+                )
         else:
-            self.status_lbl.set_markup("<big>🔴 <b>Apagada</b></big>  ·  servicio detenido")
+            self.hero_emoji.set_markup("<span size='30000'>🔴</span>")
+            self.hero_state.set_markup("<big><b>Apagada</b></big>")
+            self.hero_summary.set_markup(
+                "<span alpha='65%'>El servicio Ollama está detenido</span>"
+            )
+
         self.btn_on.set_sensitive(not up)
         self.btn_off.set_sensitive(up)
         self.btn_free.set_sensitive(up and bool(loaded))
 
         for c in self.loaded_box.get_children():
             self.loaded_box.remove(c)
-        if up:
-            if not loaded:
-                self.loaded_box.pack_start(
-                    Gtk.Label(label="— ninguno —", xalign=0), False, False, 0
-                )
+        if not up:
+            self.loaded_box.pack_start(
+                empty_state("(servicio apagado)"), False, False, 0
+            )
+        elif not loaded:
+            self.loaded_box.pack_start(
+                empty_state("— ningún modelo cargado —"), False, False, 0
+            )
+        else:
             for m in loaded:
-                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
                 name = m.get("name") or m.get("model", "?")
-                tail = ""
+                size = human_size(m.get("size", 0))
+                extra = ""
                 if "size_vram" in m and m.get("size"):
                     pct = round(100 * m["size_vram"] / m["size"])
-                    tail = f"  ·  GPU {pct}%"
-                row.pack_start(Gtk.Label(label=f"• {name}{tail}", xalign=0), True, True, 0)
+                    extra = f" · 🎮 GPU {pct}%"
                 btn = Gtk.Button(label="descargar")
+                btn.set_tooltip_text(f"Descarga {name} de RAM/VRAM (vuelve solo al usarlo)")
                 btn.connect(
                     "clicked",
-                    lambda _w, n=name: self.app._do(lambda: stop_model(n), f"Descargando {n}…"),
+                    lambda _w, n=name: self.app._do(
+                        lambda: stop_model(n), f"Descargando {n}…"
+                    ),
                 )
-                row.pack_end(btn, False, False, 0)
-                self.loaded_box.pack_start(row, False, False, 0)
+                self.loaded_box.pack_start(
+                    model_row(name, size, extra, [btn]), False, False, 0
+                )
         self.show_all()
+
+    def _stats_tick(self) -> bool:
+        gs = gpu_stats()
+        if gs:
+            total, used, busy = gs
+            self.gpu_summary.set_markup(
+                f"<small><span alpha='65%'>{human_size(used)} / {human_size(total)} VRAM</span></small>"
+            )
+            self.vram_bar.set_fraction(min(1.0, used / total))
+            self.vram_bar.set_text(f"VRAM  {int(100 * used / total)}%")
+            self.busy_bar.set_fraction(min(1.0, busy / 100))
+            self.busy_bar.set_text(f"GPU  {busy}%")
+        else:
+            self.gpu_summary.set_markup(
+                "<small><span alpha='65%'>(sin lectura de GPU vía sysfs)</span></small>"
+            )
+
+        m = mem_stats()
+        ram_total = m.get("MemTotal", 1)
+        ram_used = ram_total - m.get("MemAvailable", 0)
+        self.ram_bar.set_fraction(min(1.0, ram_used / ram_total))
+        self.ram_bar.set_text(f"RAM  {human_size(ram_used)} / {human_size(ram_total)}")
+        self.cpu_lbl.set_markup(
+            f"<small><span alpha='65%'>CPU load 1 min: {cpu_load():.2f}</span></small>"
+        )
+
+        rss = ollama_proc_rss()
+        if rss:
+            self.ollama_lbl.set_markup(
+                f"<small><span alpha='65%'>Ollama: {human_size(rss)} RAM en proceso</span></small>"
+            )
+        else:
+            self.ollama_lbl.set_markup(
+                "<small><span alpha='65%'>Ollama: servicio detenido</span></small>"
+            )
+        return True
 
 
 class ModelsTab(Gtk.Box):
+    """Download · list · delete models. Same card lenguage as the rest."""
+
     def __init__(self, app: "App"):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.app = app
 
-        h = Gtk.Label(xalign=0)
-        h.set_markup("<b>Descargar modelo nuevo</b>")
-        self.pack_start(h, False, False, 0)
+        scrolled = Gtk.ScrolledWindow(vexpand=True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=14)
+        scrolled.add(outer)
+        self.pack_start(scrolled, True, True, 0)
+
+        # — Descargar —
+        dl_frame, dl_box = make_card(
+            "Descargar modelo nuevo",
+            subtitle="Catálogo recomendado o cualquier modelo de ollama.com/library",
+        )
 
         self.combo = Gtk.ComboBoxText()
         self.combo.append_text("— elige uno recomendado —")
@@ -373,28 +561,29 @@ class ModelsTab(Gtk.Box):
             self.combo.append_text(f"{name}  ·  {desc}")
         self.combo.set_active(0)
         self.combo.connect("changed", self._on_pick)
-        self.pack_start(self.combo, False, False, 0)
+        dl_box.pack_start(self.combo, False, False, 0)
 
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.entry = Gtk.Entry(placeholder_text="…o escribe nombre:tag (p.ej. llava:7b)")
         self.btn_pull = Gtk.Button(label="Descargar")
+        self.btn_pull.set_tooltip_text("Descarga al disco. No carga en VRAM hasta usarlo.")
         self.btn_pull.connect("clicked", lambda _: self._start_pull())
         row.pack_start(self.entry, True, True, 0)
         row.pack_end(self.btn_pull, False, False, 0)
-        self.pack_start(row, False, False, 0)
+        dl_box.pack_start(row, False, False, 0)
 
         self.progress = Gtk.ProgressBar(show_text=True)
         self.progress.set_text("")
-        self.pack_start(self.progress, False, False, 0)
+        dl_box.pack_start(self.progress, False, False, 0)
+        outer.pack_start(dl_frame, False, False, 0)
 
-        h2 = Gtk.Label(xalign=0)
-        h2.set_markup("<b>Modelos instalados</b>")
-        self.pack_start(h2, False, False, 8)
-
-        scrolled = Gtk.ScrolledWindow(vexpand=True)
-        self.installed_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        scrolled.add(self.installed_box)
-        self.pack_start(scrolled, True, True, 0)
+        # — Instalados —
+        ins_frame, ins_box = make_card(
+            "Modelos instalados",
+            subtitle="Pulsa «chatear» para un terminal con  <tt>ollama run NOMBRE</tt>",
+        )
+        self.installed_box = ins_box
+        outer.pack_start(ins_frame, False, False, 0)
 
     def _on_pick(self, combo: Gtk.ComboBoxText) -> None:
         idx = combo.get_active()
@@ -440,23 +629,30 @@ class ModelsTab(Gtk.Box):
             self.installed_box.remove(c)
         if not up:
             self.installed_box.pack_start(
-                Gtk.Label(label="(servicio apagado)", xalign=0), False, False, 0
+                empty_state("(servicio apagado)"), False, False, 0
+            )
+        elif not installed:
+            self.installed_box.pack_start(
+                empty_state(
+                    "— ningún modelo instalado todavía · usa el bloque de arriba —"
+                ),
+                False,
+                False,
+                0,
             )
         else:
             for m in installed:
                 name = m.get("name", "?")
                 size = human_size(m.get("size", 0))
-                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-                row.pack_start(
-                    Gtk.Label(label=f"📦 {name}   ({size})", xalign=0), True, True, 0
-                )
                 bchat = Gtk.Button(label="chatear")
+                bchat.set_tooltip_text(f"Abre un terminal con  ollama run {name}")
                 bchat.connect("clicked", lambda _w, n=name: open_terminal(f"ollama run {n}"))
                 bdel = Gtk.Button(label="🗑")
+                bdel.set_tooltip_text(f"Borrar {name} del disco")
                 bdel.connect("clicked", lambda _w, n=name: self._del(n))
-                row.pack_end(bdel, False, False, 0)
-                row.pack_end(bchat, False, False, 0)
-                self.installed_box.pack_start(row, False, False, 0)
+                self.installed_box.pack_start(
+                    model_row(name, size, buttons=[bdel, bchat]), False, False, 0
+                )
         self.show_all()
 
     def _del(self, name: str) -> None:
@@ -476,90 +672,50 @@ class ModelsTab(Gtk.Box):
             self.app.refresh_all()
 
 
-class StatsTab(Gtk.Box):
-    def __init__(self, app: "App"):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
-        self.app = app
-
-        h = Gtk.Label(xalign=0)
-        h.set_markup("<b>GPU</b>")
-        self.pack_start(h, False, False, 0)
-        self.gpu_lbl = Gtk.Label(xalign=0)
-        self.pack_start(self.gpu_lbl, False, False, 0)
-        self.vram_bar = Gtk.ProgressBar(show_text=True)
-        self.pack_start(self.vram_bar, False, False, 0)
-        self.busy_bar = Gtk.ProgressBar(show_text=True)
-        self.pack_start(self.busy_bar, False, False, 0)
-
-        h2 = Gtk.Label(xalign=0)
-        h2.set_markup("<b>Sistema</b>")
-        self.pack_start(h2, False, False, 10)
-        self.ram_bar = Gtk.ProgressBar(show_text=True)
-        self.pack_start(self.ram_bar, False, False, 0)
-        self.cpu_lbl = Gtk.Label(xalign=0)
-        self.pack_start(self.cpu_lbl, False, False, 0)
-
-        h3 = Gtk.Label(xalign=0)
-        h3.set_markup("<b>Servicio Ollama</b>")
-        self.pack_start(h3, False, False, 10)
-        self.ollama_lbl = Gtk.Label(xalign=0)
-        self.pack_start(self.ollama_lbl, False, False, 0)
-
-        GLib.timeout_add(STATS_REFRESH_MS, self._tick)
-        self._tick()
-
-    def _tick(self) -> bool:
-        gs = gpu_stats()
-        if gs:
-            total, used, busy = gs
-            free = total - used
-            self.gpu_lbl.set_text(
-                f"Total {human_size(total)}  ·  Usado {human_size(used)}  ·  Libre {human_size(free)}"
-            )
-            self.vram_bar.set_fraction(min(1.0, used / total))
-            self.vram_bar.set_text(f"VRAM  {int(100 * used / total)}%")
-            self.busy_bar.set_fraction(min(1.0, busy / 100))
-            self.busy_bar.set_text(f"GPU activa  {busy}%")
-        else:
-            self.gpu_lbl.set_text("(sin lectura de GPU vía sysfs; ¿no es AMD o sin permisos?)")
-
-        m = mem_stats()
-        ram_total = m.get("MemTotal", 1)
-        ram_used = ram_total - m.get("MemAvailable", 0)
-        self.ram_bar.set_fraction(min(1.0, ram_used / ram_total))
-        self.ram_bar.set_text(f"RAM  {human_size(ram_used)} / {human_size(ram_total)}")
-        self.cpu_lbl.set_text(f"Carga CPU (1 min): {cpu_load():.2f}")
-
-        rss = ollama_proc_rss()
-        if rss:
-            self.ollama_lbl.set_text(f"Proceso vivo · RAM: {human_size(rss)}")
-        else:
-            self.ollama_lbl.set_text("Proceso no encontrado (servicio apagado)")
-        return True
-
-
 class LogsTab(Gtk.Box):
+    """Live tail of journalctl -fu ollama, wrapped in a card for consistency."""
+
     def __init__(self, app: "App"):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=14)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.app = app
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        lbl = Gtk.Label(xalign=0)
-        lbl.set_markup("<b>journalctl -fu ollama</b>")
-        bar.pack_start(lbl, True, True, 0)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0, margin=14)
+        self.pack_start(outer, True, True, 0)
+
+        frame, content = make_card(
+            "Logs del servicio Ollama",
+            subtitle="journalctl -fu ollama · streaming en vivo · autoscroll",
+        )
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bar.pack_start(Gtk.Box(), True, True, 0)  # spacer
+        bbottom = Gtk.Button(label="↓ ir al final")
+        bbottom.set_tooltip_text("Saltar al final del log")
+        bbottom.connect("clicked", lambda _: self._scroll_bottom())
         bclear = Gtk.Button(label="Limpiar")
+        bclear.set_tooltip_text("Vacía el buffer en pantalla (no afecta al journal real)")
         bclear.connect("clicked", lambda _: self.buf.set_text(""))
         bar.pack_end(bclear, False, False, 0)
-        self.pack_start(bar, False, False, 0)
+        bar.pack_end(bbottom, False, False, 0)
+        content.pack_start(bar, False, False, 0)
 
         sw = Gtk.ScrolledWindow(vexpand=True)
-        self.view = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        sw.set_min_content_height(280)
+        self.view = Gtk.TextView(
+            editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR
+        )
         self.buf = self.view.get_buffer()
         sw.add(self.view)
-        self.pack_start(sw, True, True, 0)
+        content.pack_start(sw, True, True, 0)
+        outer.pack_start(frame, True, True, 0)
 
         self.proc: subprocess.Popen | None = None
         self._start_tail()
+
+    def _scroll_bottom(self) -> None:
+        adj = self.view.get_vadjustment()
+        if adj is not None:
+            adj.set_value(adj.get_upper() - adj.get_page_size())
 
     def _start_tail(self) -> None:
         try:
@@ -903,25 +1059,25 @@ class ProfilesTab(Gtk.Box):
 class ControlWindow(Gtk.Window):
     def __init__(self, app: "App"):
         super().__init__(title=f"local-ai-control · v{VERSION}")
-        self.set_default_size(720, 560)
+        self.set_default_size(860, 640)
         self.set_icon_name("computer")
         self.app = app
 
         nb = Gtk.Notebook()
         self.add(nb)
-        self.tab_status = StatusTab(app)
+        # Tab order optimised for daily use: home → manage → extend → presets → debug.
+        # Logs goes last on purpose (you only open it when something's wrong).
+        self.tab_dashboard = DashboardTab(app)
         self.tab_models = ModelsTab(app)
-        self.tab_stats = StatsTab(app)
-        self.tab_logs = LogsTab(app)
         self.tab_integrations = IntegrationsTab(app)
         self.tab_profiles = ProfilesTab(app)
+        self.tab_logs = LogsTab(app)
         for w, name in (
-            (self.tab_status, "Estado"),
+            (self.tab_dashboard, "Dashboard"),
             (self.tab_models, "Modelos"),
-            (self.tab_stats, "Recursos"),
-            (self.tab_logs, "Logs"),
             (self.tab_integrations, "Integraciones"),
             (self.tab_profiles, "Perfiles"),
+            (self.tab_logs, "Logs"),
         ):
             nb.append_page(w, Gtk.Label(label=name))
 
@@ -939,7 +1095,7 @@ class ControlWindow(Gtk.Window):
         up = service_up()
         loaded = loaded_models() if up else []
         installed = installed_models() if up else []
-        self.tab_status.refresh(up, loaded)
+        self.tab_dashboard.refresh(up, loaded)
         self.tab_models.refresh(up, installed)
         self.tab_integrations.refresh()
 
