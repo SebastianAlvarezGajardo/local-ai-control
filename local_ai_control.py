@@ -35,9 +35,11 @@ from gi.repository import GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
+COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
+COMFYUI_DIR = os.path.expanduser(os.environ.get("COMFYUI_DIR", "~/ComfyUI"))
 REFRESH_MS = 4000
 STATS_REFRESH_MS = 2000
 GPU_CARDS = ("/sys/class/drm/card1/device", "/sys/class/drm/card0/device")
@@ -220,6 +222,18 @@ def webui_installed() -> bool:
 def webui_running() -> bool:
     try:
         urllib.request.urlopen(OPEN_WEBUI, timeout=1)
+        return True
+    except Exception:
+        return False
+
+
+def comfyui_installed() -> bool:
+    return os.path.isfile(os.path.join(COMFYUI_DIR, "main.py"))
+
+
+def comfyui_running() -> bool:
+    try:
+        urllib.request.urlopen(COMFYUI_URL, timeout=1)
         return True
     except Exception:
         return False
@@ -599,6 +613,54 @@ class IntegrationsTab(Gtk.Box):
         row3.pack_start(ai_launch, True, True, 0)
         self.pack_start(row3, False, False, 0)
 
+        # — ComfyUI (generación de imagen) —
+        self._section_title(
+            "ComfyUI",
+            "generación de imagen local · SDXL, SD 1.5, Flux schnell",
+            top=12,
+        )
+        self.comfyui_status = Gtk.Label(xalign=0)
+        self.pack_start(self.comfyui_status, False, False, 0)
+
+        comfy_install_cmd = (
+            "set -e && "
+            "echo '── Instalando ComfyUI con PyTorch ROCm para tu Radeon ──' && "
+            "echo 'Esto descarga ~6 GB y tarda ~15-20 minutos. Puedes seguir con otras cosas.' && "
+            "echo && "
+            f"git clone https://github.com/comfyanonymous/ComfyUI {COMFYUI_DIR} && "
+            f"cd {COMFYUI_DIR} && "
+            "python3 -m venv venv && "
+            "source venv/bin/activate && "
+            "pip install --upgrade pip && "
+            "pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 && "
+            "pip install -r requirements.txt && "
+            "echo && echo '✅ ComfyUI instalado.' && "
+            "echo && "
+            "echo 'Siguiente paso (no automático):  descarga un checkpoint en' && "
+            f"echo '  {COMFYUI_DIR}/models/checkpoints/' && "
+            "echo 'Sugerencias para tu GPU 8GB:' && "
+            "echo '  · SDXL Turbo (~6 GB, rapidísimo):  https://huggingface.co/stabilityai/sdxl-turbo' && "
+            "echo '  · SD 1.5 (~4 GB, mil LoRAs):       https://huggingface.co/runwayml/stable-diffusion-v1-5' && "
+            "echo && "
+            "echo 'Cuando tengas un .safetensors ahí, vuelve al panel y pulsa \"Iniciar servicio\".'"
+        )
+        comfy_start_cmd = (
+            f"cd {COMFYUI_DIR} && "
+            "source venv/bin/activate && "
+            "python main.py --listen"
+        )
+
+        row4 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.btn_comfy_install = Gtk.Button(label="Instalar")
+        self.btn_comfy_install.connect("clicked", lambda _: open_terminal(comfy_install_cmd))
+        self.btn_comfy_start = Gtk.Button(label="Iniciar servicio")
+        self.btn_comfy_start.connect("clicked", lambda _: open_terminal(comfy_start_cmd))
+        self.btn_comfy_open = Gtk.Button(label="Abrir en navegador")
+        self.btn_comfy_open.connect("clicked", lambda _: webbrowser.open(COMFYUI_URL))
+        for b in (self.btn_comfy_install, self.btn_comfy_start, self.btn_comfy_open):
+            row4.pack_start(b, True, True, 0)
+        self.pack_start(row4, False, False, 0)
+
         self.refresh()
 
     def _section_title(self, title: str, subtitle: str, top: int = 0) -> None:
@@ -629,6 +691,24 @@ class IntegrationsTab(Gtk.Box):
         self.aider_status.set_markup(
             "✅ instalado" if shutil.which("aider") else "❌ no instalado"
         )
+
+        if comfyui_installed():
+            running = comfyui_running()
+            self.comfyui_status.set_markup(
+                "✅ instalado · 🟢 corriendo en :8188"
+                if running
+                else "✅ instalado · 🔴 parado"
+            )
+            self.btn_comfy_install.set_sensitive(False)
+            self.btn_comfy_start.set_sensitive(not running)
+            self.btn_comfy_open.set_sensitive(running)
+        else:
+            self.comfyui_status.set_markup(
+                "❌ no instalado · pesa ~10 GB con dependencias + un modelo"
+            )
+            self.btn_comfy_install.set_sensitive(True)
+            self.btn_comfy_start.set_sensitive(False)
+            self.btn_comfy_open.set_sensitive(False)
 
 
 class ProfilesTab(Gtk.Box):

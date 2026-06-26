@@ -21,7 +21,7 @@ En Mac y Windows Ollama trae una app de bandeja oficial; en Linux no. **`local-a
 - 📦 **Gestión de modelos** — descargar con barra de progreso real, borrar con confirmación, catálogo curado de modelos recomendados.
 - 📊 **Monitor de recursos** — VRAM, GPU activa %, RAM del sistema, carga CPU y RAM del proceso `ollama`, todo en vivo (lectura de `sysfs amdgpu` sin herramientas externas).
 - 📜 **Logs en vivo** — `journalctl -fu ollama` integrado en una pestaña.
-- 🔌 **Integraciones** — un clic para instalar/iniciar/abrir **Open WebUI** (chat web con memoria y RAG), **opencode** y **Aider** preconfigurados con tu modelo local.
+- 🔌 **Integraciones** — un clic para instalar/iniciar/abrir **Open WebUI** (chat web con memoria y RAG), **opencode**, **Aider** y **ComfyUI** (generación de imagen local con SDXL/SD 1.5/Flux).
 - 🎚️ **Perfiles** — *Modo juego* libera VRAM; *Modo trabajo* precarga `qwen2.5-coder`; *Modo estudio* precarga `gemma3` y abre Open WebUI.
 
 ### Capturas
@@ -114,7 +114,7 @@ Ollama ships an official menu-bar app on macOS and Windows; not on Linux. **`loc
 - 📦 **Model management** — pull with real progress bar, delete with confirmation, curated quick-pick of recommended models.
 - 📊 **Resource monitor** — VRAM, GPU busy %, system RAM, CPU load and Ollama process RAM in real time (reads AMD GPU stats directly from `sysfs`, no extra tools needed).
 - 📜 **Live logs** — embedded `journalctl -fu ollama`.
-- 🔌 **Ecosystem integrations** — one-click install/launch for **Open WebUI** (web chat with memory + RAG), **opencode** and **Aider** preconfigured with your local model.
+- 🔌 **Ecosystem integrations** — one-click install/launch for **Open WebUI** (web chat with memory + RAG), **opencode**, **Aider** and **ComfyUI** (local image generation with SDXL/SD 1.5/Flux).
 - 🎚️ **Profiles** — *Gaming* frees VRAM; *Work* preloads `qwen2.5-coder`; *Study* preloads `gemma3` and opens Open WebUI.
 
 ### Install

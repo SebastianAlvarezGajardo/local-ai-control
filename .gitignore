@@ -7,3 +7,10 @@ venv/
 .vscode/
 .DS_Store
 *.swp
+.aider*
+
+# Open WebUI runtime artifacts (no deberían crearse aquí, pero por si acaso)
+.webui_secret_key
+backend/
+uploads/
+.open-webui/
