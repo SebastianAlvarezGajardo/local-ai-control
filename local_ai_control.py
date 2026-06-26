@@ -38,11 +38,12 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_DIR = os.path.expanduser(os.environ.get("COMFYUI_DIR", "~/ComfyUI"))
+N8N_URL = os.environ.get("N8N_URL", "http://localhost:5678")
 REFRESH_MS = 4000
 STATS_REFRESH_MS = 2000
 GPU_CARDS = ("/sys/class/drm/card1/device", "/sys/class/drm/card0/device")
@@ -67,6 +68,9 @@ CATALOG: list[tuple[str, str]] = [
     ("moondream:1.8b", "Moondream 1.8B — visión ultra-ligera (~1.7 GB)"),
     ("llava:7b", "LLaVA 7B — visión clásica (~4.7 GB)"),
     ("llama3.2-vision:11b", "Llama 3.2 Vision 11B (Meta) — visión moderna (~8 GB)"),
+    # — agentes / tool-calling (úsalos con n8n) —
+    ("hermes3:3b", "Hermes 3 3B (Nous) — agente ligero con tool-calling"),
+    ("hermes3:8b", "Hermes 3 8B (Nous) — agente para n8n / function calling"),
     # — utilidad —
     ("nomic-embed-text", "Embeddings (para RAG) — ~274 MB"),
 ]
@@ -223,16 +227,20 @@ def find_binary(name: str, extra_dirs: list[str] | None = None) -> str | None:
 
     GNOME autostart entries don't get the user's interactive-shell PATH
     (no `.bashrc` is sourced for non-shell processes), so binaries that
-    live under `~/.local/bin` or `~/.<tool>/bin` are often invisible to
-    `shutil.which()`. We try PATH first and fall back to a curated list
-    of common per-user install dirs plus any caller-provided ones.
+    live under `~/.local/bin`, `~/.<tool>/bin` or inside an nvm Node
+    install are often invisible to `shutil.which()`. We try PATH first
+    and fall back to a curated list of common per-user install dirs plus
+    any caller-provided ones.
     """
     if hit := shutil.which(name):
         return hit
+    import glob
     candidates: list[str] = [
         os.path.expanduser(f"~/.local/bin/{name}"),
         os.path.expanduser(f"~/.{name}/bin/{name}"),  # e.g. ~/.opencode/bin/opencode
     ]
+    # nvm-installed Node tools live in ~/.nvm/versions/node/<version>/bin/
+    candidates += glob.glob(os.path.expanduser(f"~/.nvm/versions/node/*/bin/{name}"))
     if extra_dirs:
         candidates += [os.path.join(os.path.expanduser(d), name) for d in extra_dirs]
     for c in candidates:
@@ -320,6 +328,23 @@ def webui_pid() -> int | None:
 def comfyui_pid() -> int | None:
     """Find the running ComfyUI main.py process, if any."""
     return find_pid_matching(r"ComfyUI/.*python.*main\.py|ComfyUI.*main\.py.*--listen")
+
+
+def n8n_installed() -> bool:
+    return find_binary("n8n") is not None
+
+
+def n8n_running() -> bool:
+    try:
+        urllib.request.urlopen(N8N_URL, timeout=1)
+        return True
+    except Exception:
+        return False
+
+
+def n8n_pid() -> int | None:
+    """The actual process is `node .../n8n/bin/n8n` — match that."""
+    return find_pid_matching(r"node.*n8n/bin/n8n|n8n[^=]*start$")
 
 
 def human_size(b: float) -> str:
@@ -930,6 +955,9 @@ class IntegrationsTab(Gtk.Box):
         cat_image = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8, margin_start=6
         )
+        cat_auto = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8, margin_start=6
+        )
 
         # — Open WebUI —
         self.btn_webui_install = Gtk.Button(label="Instalar (pipx)")
@@ -1068,6 +1096,46 @@ class IntegrationsTab(Gtk.Box):
             0,
         )
 
+        # — n8n (workflows / agentes) —
+        # Las llamadas a Node se hacen vía  '. ~/.nvm/nvm.sh && …'  porque
+        # nvm hookea el PATH solo en shells interactivas; lo cargamos
+        # explícitamente para no depender de qué shell abrió el terminal.
+        n8n_install_cmd = (
+            "set -e && "
+            "echo '── Instalando n8n vía npm (global, sin sudo gracias a nvm) ──' && "
+            "echo 'Tarda ~1-2 min, descarga ~200 MB.' && echo && "
+            ". ~/.nvm/nvm.sh && "
+            "npm install -g n8n && "
+            "echo && echo '✅ n8n instalado.' && "
+            "echo && "
+            "echo 'Próximo paso: vuelve al panel y pulsa \"Iniciar servicio\".' && "
+            "echo 'La primera vez tardará ~30s en arrancar.'"
+        )
+        n8n_start_cmd = ". ~/.nvm/nvm.sh && n8n"
+
+        self.n8n_install_cmd = n8n_install_cmd
+        self._n8n_start_cmd = n8n_start_cmd
+
+        self.btn_n8n_install = Gtk.Button(label="Instalar (npm)")
+        self.btn_n8n_install.connect("clicked", lambda _: open_terminal(n8n_install_cmd))
+        self.btn_n8n_start = Gtk.Button(label="Iniciar servicio")
+        self.btn_n8n_start.connect("clicked", self._toggle_n8n)
+        self.btn_n8n_open = Gtk.Button(label="Abrir en navegador")
+        self.btn_n8n_open.connect("clicked", lambda _: webbrowser.open(N8N_URL))
+        self.btn_n8n_install.set_no_show_all(True)
+        self.n8n_status = Gtk.Label(xalign=0)
+        cat_auto.pack_start(
+            self._card(
+                "🔁 n8n",
+                "workflows visuales · nodo nativo de Ollama · perfecto con hermes3 para agentes",
+                self.n8n_status,
+                [self.btn_n8n_install, self.btn_n8n_start, self.btn_n8n_open],
+            ),
+            False,
+            False,
+            0,
+        )
+
         # Wrap each category in its own collapsible expander.
         # Default: only "Chat y memoria" expanded — the rest collapse to one
         # line so the tab fits in one screen. Click to expand on demand.
@@ -1086,6 +1154,12 @@ class IntegrationsTab(Gtk.Box):
         outer.pack_start(
             self._category(
                 "applications-graphics-symbolic", "Imagen", cat_image, expanded=False
+            ),
+            False, False, 0,
+        )
+        outer.pack_start(
+            self._category(
+                "system-run-symbolic", "Automatización", cat_auto, expanded=False
             ),
             False, False, 0,
         )
@@ -1139,6 +1213,14 @@ class IntegrationsTab(Gtk.Box):
             GLib.idle_add(self.app.refresh_all)
         else:
             open_terminal(self._comfy_start_cmd)
+
+    def _toggle_n8n(self, _w: Gtk.Button) -> None:
+        if pid := n8n_pid():
+            ok = stop_pid(pid)
+            notify("n8n parado" if ok else "No se pudo parar n8n", f"PID {pid}")
+            GLib.idle_add(self.app.refresh_all)
+        else:
+            open_terminal(self._n8n_start_cmd)
 
     def _category(
         self,
@@ -1283,6 +1365,34 @@ class IntegrationsTab(Gtk.Box):
             self.btn_comfy_install.set_sensitive(True)
             self.btn_comfy_start.set_sensitive(False)
             self.btn_comfy_open.set_sensitive(False)
+
+        # ── n8n ──
+        if n8n_installed():
+            pid = n8n_pid()
+            http_ok = n8n_running() if pid else False
+            if pid and http_ok:
+                self.n8n_status.set_markup(
+                    f"✅ instalado · 🟢 corriendo en :5678 · PID {pid}"
+                )
+                self.btn_n8n_start.set_label("⏹ Parar")
+            elif pid:
+                self.n8n_status.set_markup(
+                    f"✅ instalado · 🟡 arrancando (PID {pid})…"
+                )
+                self.btn_n8n_start.set_label("⏹ Parar")
+            else:
+                self.n8n_status.set_markup("✅ instalado · 🔴 parado")
+                self.btn_n8n_start.set_label("Iniciar servicio")
+            self.btn_n8n_install.set_visible(False)
+            self.btn_n8n_start.set_sensitive(True)
+            self.btn_n8n_open.set_sensitive(bool(http_ok))
+        else:
+            self.n8n_status.set_markup("❌ no instalado · pesa ~200 MB en node_modules")
+            self.btn_n8n_start.set_label("Iniciar servicio")
+            self.btn_n8n_install.set_visible(True)
+            self.btn_n8n_install.set_sensitive(True)
+            self.btn_n8n_start.set_sensitive(False)
+            self.btn_n8n_open.set_sensitive(False)
 
 
 class ProfilesTab(Gtk.Box):
