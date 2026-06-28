@@ -1469,7 +1469,12 @@ class IntegrationsTab(Gtk.Box):
             "echo '── Instalando whisper.cpp (transcripción local) ──' && "
             "echo 'Compila con cmake y baja el modelo base (~150 MB). Tarda unos minutos.' && "
             "echo && "
-            "command -v cmake >/dev/null || { echo '❌ Falta cmake. Instala: sudo apt install cmake build-essential'; exit 1; } && "
+            # cmake suele faltar (gcc/make sí están). Si no está, lo instalamos
+            # con apt (pedirá tu contraseña en este terminal). Cubre Debian/Ubuntu.
+            "if ! command -v cmake >/dev/null; then "
+            "echo '── Falta cmake: lo instalo (te pedirá tu contraseña) ──'; "
+            "sudo apt-get update && sudo apt-get install -y cmake build-essential; "
+            "fi && "
             f"git clone https://github.com/ggml-org/whisper.cpp {shlex.quote(WHISPER_DIR)} 2>/dev/null || echo '(ya clonado, sigo)' && "
             f"cd {shlex.quote(WHISPER_DIR)} && "
             "cmake -B build && "
