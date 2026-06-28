@@ -58,6 +58,7 @@ COMFY_MODELS = (
         "filename": "flux1-schnell-fp8.safetensors",
         "url": "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors",
         "note": "Mejor calidad, Apache-2.0 (uso comercial). Corre con offload a RAM.",
+        "wf": {"steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple", "w": 1024, "h": 1024},
     },
     {
         "key": "sdxl-base",
@@ -65,6 +66,7 @@ COMFY_MODELS = (
         "filename": "sd_xl_base_1.0.safetensors",
         "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
         "note": "Gran calidad y entra en 8 GB de VRAM. Mil LoRAs disponibles.",
+        "wf": {"steps": 30, "cfg": 7.0, "sampler": "dpmpp_2m", "scheduler": "karras", "w": 1024, "h": 1024},
     },
     {
         "key": "sdxl-turbo",
@@ -72,6 +74,7 @@ COMFY_MODELS = (
         "filename": "sd_xl_turbo_1.0_fp16.safetensors",
         "url": "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors",
         "note": "El más rápido (1 paso), ideal para iterar. Calidad algo menor.",
+        "wf": {"steps": 1, "cfg": 1.0, "sampler": "euler_ancestral", "scheduler": "normal", "w": 512, "h": 512},
     },
 )
 N8N_URL = os.environ.get("N8N_URL", "http://localhost:5678")
@@ -364,6 +367,90 @@ def webui_running() -> bool:
 
 def comfyui_installed() -> bool:
     return os.path.isfile(os.path.join(COMFYUI_DIR, "main.py"))
+
+
+def comfy_workflow_json(model: dict) -> str:
+    """Genera un workflow ComfyUI (formato litegraph, arrastrable/abrible) para
+    un modelo del catálogo. Los tres usan el mismo grafo básico —
+    CheckpointLoaderSimple → CLIPTextEncode×2 → KSampler → VAEDecode → SaveImage—
+    y solo cambian los widgets (checkpoint, pasos, cfg, sampler, scheduler,
+    tamaño). Estructura validada contra /prompt (node_errors: {})."""
+    wf = model["wf"]
+    graph = {
+        "last_node_id": 9,
+        "last_link_id": 9,
+        "nodes": [
+            {"id": 7, "type": "CLIPTextEncode", "pos": [413, 389], "size": [425, 180],
+             "flags": {}, "order": 3, "mode": 0,
+             "inputs": [{"name": "clip", "type": "CLIP", "link": 5}],
+             "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [6], "slot_index": 0}],
+             "properties": {"Node name for S&R": "CLIPTextEncode"}, "widgets_values": [""]},
+            {"id": 6, "type": "CLIPTextEncode", "pos": [415, 186], "size": [422, 164],
+             "flags": {}, "order": 2, "mode": 0,
+             "inputs": [{"name": "clip", "type": "CLIP", "link": 3}],
+             "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [4], "slot_index": 0}],
+             "properties": {"Node name for S&R": "CLIPTextEncode"},
+             "widgets_values": ["a cinematic photo of a red fox in a misty forest at golden hour, highly detailed"]},
+            {"id": 5, "type": "EmptyLatentImage", "pos": [473, 609], "size": [315, 106],
+             "flags": {}, "order": 0, "mode": 0, "inputs": [],
+             "outputs": [{"name": "LATENT", "type": "LATENT", "links": [2], "slot_index": 0}],
+             "properties": {"Node name for S&R": "EmptyLatentImage"},
+             "widgets_values": [wf["w"], wf["h"], 1]},
+            {"id": 3, "type": "KSampler", "pos": [863, 186], "size": [315, 262],
+             "flags": {}, "order": 4, "mode": 0,
+             "inputs": [
+                 {"name": "model", "type": "MODEL", "link": 1},
+                 {"name": "positive", "type": "CONDITIONING", "link": 4},
+                 {"name": "negative", "type": "CONDITIONING", "link": 6},
+                 {"name": "latent_image", "type": "LATENT", "link": 2}],
+             "outputs": [{"name": "LATENT", "type": "LATENT", "links": [7], "slot_index": 0}],
+             "properties": {"Node name for S&R": "KSampler"},
+             "widgets_values": [0, "randomize", wf["steps"], wf["cfg"],
+                                wf["sampler"], wf["scheduler"], 1]},
+            {"id": 8, "type": "VAEDecode", "pos": [1209, 188], "size": [210, 46],
+             "flags": {}, "order": 5, "mode": 0,
+             "inputs": [{"name": "samples", "type": "LATENT", "link": 7},
+                        {"name": "vae", "type": "VAE", "link": 8}],
+             "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [9], "slot_index": 0}],
+             "properties": {"Node name for S&R": "VAEDecode"}},
+            {"id": 9, "type": "SaveImage", "pos": [1451, 189], "size": [210, 270],
+             "flags": {}, "order": 6, "mode": 0,
+             "inputs": [{"name": "images", "type": "IMAGE", "link": 9}],
+             "outputs": [], "properties": {}, "widgets_values": ["ComfyUI"]},
+            {"id": 4, "type": "CheckpointLoaderSimple", "pos": [26, 474], "size": [315, 98],
+             "flags": {}, "order": 1, "mode": 0, "inputs": [],
+             "outputs": [
+                 {"name": "MODEL", "type": "MODEL", "links": [1], "slot_index": 0},
+                 {"name": "CLIP", "type": "CLIP", "links": [3, 5], "slot_index": 1},
+                 {"name": "VAE", "type": "VAE", "links": [8], "slot_index": 2}],
+             "properties": {"Node name for S&R": "CheckpointLoaderSimple"},
+             "widgets_values": [model["filename"]]},
+        ],
+        "links": [
+            [1, 4, 0, 3, 0, "MODEL"], [2, 5, 0, 3, 3, "LATENT"],
+            [3, 4, 1, 6, 0, "CLIP"], [4, 6, 0, 3, 1, "CONDITIONING"],
+            [5, 4, 1, 7, 0, "CLIP"], [6, 7, 0, 3, 2, "CONDITIONING"],
+            [7, 3, 0, 8, 0, "LATENT"], [8, 4, 2, 8, 1, "VAE"],
+            [9, 8, 0, 9, 0, "IMAGE"],
+        ],
+        "groups": [], "config": {}, "extra": {}, "version": 0.4,
+    }
+    return json.dumps(graph, indent=2)
+
+
+def comfy_install_workflow(model: dict) -> str | None:
+    """Escribe el workflow del modelo en user/default/workflows/ (si no existe)
+    para que ComfyUI abra con un flujo funcional. Devuelve la ruta o None."""
+    wf_dir = os.path.join(COMFYUI_DIR, "user", "default", "workflows")
+    path = os.path.join(wf_dir, f"{model['key']}.json")
+    try:
+        os.makedirs(wf_dir, exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w") as f:
+                f.write(comfy_workflow_json(model))
+        return path
+    except OSError:
+        return None
 
 
 def comfyui_has_checkpoint() -> bool:
@@ -1364,7 +1451,19 @@ class IntegrationsTab(Gtk.Box):
             False, False, 0,
         )
 
+        self._ensure_comfy_workflows()
         self.refresh()
+
+    def _ensure_comfy_workflows(self) -> None:
+        """Para cada modelo cuyo checkpoint ya esté descargado, deja su workflow
+        en user/default/workflows/ (una vez). Cubre modelos bajados antes de
+        existir esta feature, como el Flux de la 1ª descarga."""
+        if not comfyui_installed():
+            return
+        ckpt_dir = os.path.join(COMFYUI_DIR, "models", "checkpoints")
+        for m in COMFY_MODELS:
+            if os.path.isfile(os.path.join(ckpt_dir, m["filename"])):
+                comfy_install_workflow(m)
 
     def _pick_folder(self, title: str) -> str | None:
         """Open a GTK folder picker centered on our window. Returns path or None."""
@@ -1475,6 +1574,9 @@ class IntegrationsTab(Gtk.Box):
             "echo && echo '✅ Modelo listo. Vuelve al panel y pulsa \"Iniciar servicio\".'"
         )
         open_terminal(cmd)
+        # Deja un workflow funcional para este modelo → ComfyUI abre listo para
+        # generar (sin el lío de plantillas que piden modelos que no tienes).
+        comfy_install_workflow(model)
 
         def watch() -> None:
             # Espera (hasta 1h) a que el .safetensors exista y deje de crecer.
