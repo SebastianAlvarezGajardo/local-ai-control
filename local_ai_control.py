@@ -12,6 +12,7 @@ Homepage: https://github.com/SebastianAlvarezGajardo/local-ai-control
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -2025,6 +2026,168 @@ class ProfilesTab(Gtk.Box):
         notify("📚 Modo estudio", "Modelo precargado y WebUI abierta")
 
 
+def paths_size_bytes(patterns: list[str]) -> int:
+    """Suma el tamaño (bytes) de las rutas que casen los patrones glob.
+    Usa `du -sb` (rápido y respeta hardlinks). 0 si no existe nada."""
+    paths = []
+    for p in patterns:
+        paths.extend(glob.glob(os.path.expanduser(p)))
+    if not paths:
+        return 0
+    try:
+        r = subprocess.run(["du", "-scb", *paths], capture_output=True, text=True, timeout=120)
+        total = 0
+        for line in r.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 2 and parts[1] == "total":
+                return int(parts[0])
+            if len(parts) == 2:
+                total = int(parts[0])  # fallback: última cifra si no hay 'total'
+        return total
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return 0
+
+
+# Inventario para la pestaña Espacio. `remove` es el comando shell que lo
+# desinstala (None = no se ofrece borrar desde aquí). `paths` admite globs.
+SPACE_ITEMS = [
+    {"name": "🧠 Modelos de Ollama", "paths": ["~/.ollama/models"],
+     "hint": "texto/chat (Hermes, Gemma…). Gestiónalos en la pestaña Modelos.",
+     "remove": None},
+    {"name": "🎨 ComfyUI", "paths": [COMFYUI_DIR],
+     "hint": "repo + venv PyTorch ROCm + modelos de imagen.",
+     "remove": f"rm -rf {shlex.quote(COMFYUI_DIR)}"},
+    {"name": "💬 Open WebUI", "paths": ["~/.local/share/pipx/venvs/open-webui"],
+     "hint": "chat web con memoria/RAG (pipx).",
+     "remove": "pipx uninstall open-webui"},
+    {"name": "🤝 Aider", "paths": ["~/.local/share/pipx/venvs/aider-chat"],
+     "hint": "pair-programming en terminal (pipx).",
+     "remove": "pipx uninstall aider-chat"},
+    {"name": "⌨️ opencode", "paths": ["~/.opencode"],
+     "hint": "asistente de código en terminal.",
+     "remove": "rm -rf ~/.opencode"},
+    {"name": "🔁 n8n", "paths": ["~/.nvm/versions/node/*/lib/node_modules/n8n", "~/.n8n"],
+     "hint": "workflows/agentes (npm global vía nvm) + sus datos.",
+     "remove": ". ~/.nvm/nvm.sh && npm uninstall -g n8n"},
+    {"name": "🎙️ Whisper", "paths": [WHISPER_DIR],
+     "hint": "transcripción de voz (whisper.cpp + modelo).",
+     "remove": f"rm -rf {shlex.quote(WHISPER_DIR)}"},
+]
+
+
+class SpaceTab(Gtk.Box):
+    """Cuánto ocupa cada integración + desinstalar desde un sitio.
+
+    Los tamaños se calculan en un hilo (du sobre decenas de GB tarda) y se
+    pintan vía GLib.idle_add. Desinstalar pide confirmación y corre en un
+    terminal (lo ves) antes de re-escanear."""
+
+    def __init__(self, app: "App"):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=14)
+        self.app = app
+        self._rows = {}
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title = Gtk.Label(xalign=0)
+        title.set_markup("<b>Espacio en disco</b> — qué ocupa cada integración")
+        head.pack_start(title, True, True, 0)
+        self.btn_rescan = Gtk.Button(label="🔄 Recalcular")
+        self.btn_rescan.connect("clicked", lambda _: self.rescan())
+        head.pack_start(self.btn_rescan, False, False, 0)
+        self.pack_start(head, False, False, 0)
+
+        self.disk_lbl = Gtk.Label(xalign=0)
+        self.disk_lbl.get_style_context().add_class("dim-label")
+        self.pack_start(self.disk_lbl, False, False, 0)
+
+        for item in SPACE_ITEMS:
+            frame = Gtk.Frame()
+            frame.set_shadow_type(Gtk.ShadowType.NONE)
+            frame.get_style_context().add_class("card")
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, margin=10)
+
+            texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            name = Gtk.Label(xalign=0)
+            name.set_markup(f"<b>{item['name']}</b>")
+            texts.pack_start(name, False, False, 0)
+            hint = Gtk.Label(xalign=0, wrap=True)
+            hint.set_markup(f"<span alpha='60%'>{item['hint']}</span>")
+            texts.pack_start(hint, False, False, 0)
+            box.pack_start(texts, True, True, 0)
+
+            size_lbl = Gtk.Label(label="…")
+            size_lbl.set_width_chars(9)
+            box.pack_start(size_lbl, False, False, 0)
+
+            if item["remove"]:
+                btn = Gtk.Button(label="🗑 Desinstalar")
+                btn.connect("clicked", self._make_uninstall(item))
+                box.pack_start(btn, False, False, 0)
+
+            frame.add(box)
+            self.pack_start(frame, False, False, 0)
+            self._rows[item["name"]] = size_lbl
+
+        self.rescan()
+
+    def rescan(self) -> None:
+        self.btn_rescan.set_sensitive(False)
+        for lbl in self._rows.values():
+            lbl.set_text("…")
+        try:
+            usage = shutil.disk_usage(os.path.expanduser("~"))
+            self.disk_lbl.set_text(
+                f"Disco: {human_size(usage.free)} libres de {human_size(usage.total)}"
+            )
+        except OSError:
+            pass
+
+        def worker() -> None:
+            total = 0
+            for item in SPACE_ITEMS:
+                size = paths_size_bytes(item["paths"])
+                total += size
+                txt = human_size(size) if size else "—"
+                GLib.idle_add(self._set_size, item["name"], txt)
+            GLib.idle_add(self._scan_done, total)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_size(self, name: str, text: str) -> bool:
+        if name in self._rows:
+            self._rows[name].set_markup(f"<tt>{text}</tt>")
+        return False
+
+    def _scan_done(self, total: int) -> bool:
+        self.btn_rescan.set_sensitive(True)
+        cur = self.disk_lbl.get_text()
+        self.disk_lbl.set_text(f"{cur}  ·  stack IA: {human_size(total)}")
+        return False
+
+    def _make_uninstall(self, item: dict):
+        def handler(_btn: Gtk.Button) -> None:
+            dlg = Gtk.MessageDialog(
+                transient_for=self.app.window,
+                modal=True,
+                message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK_CANCEL,
+                text=f"¿Desinstalar {item['name']}?",
+            )
+            dlg.format_secondary_text(
+                f"Se ejecutará en un terminal:\n\n{item['remove']}\n\n"
+                "Tus modelos de Ollama NO se tocan. Esto es reversible "
+                "reinstalando desde Integraciones."
+            )
+            resp = dlg.run()
+            dlg.destroy()
+            if resp == Gtk.ResponseType.OK:
+                open_terminal(
+                    item["remove"]
+                    + " ; echo ; echo '✅ Hecho. Vuelve al panel y pulsa Recalcular.'"
+                )
+        return handler
+
+
 # ── UI: window + tray ─────────────────────────────────────────────────────
 class OnboardingWindow(Gtk.Window):
     """First-run flow: turn Ollama on, preload the best model this GPU can run, then
@@ -2198,12 +2361,14 @@ class ControlWindow(Gtk.Window):
         self.tab_models = ModelsTab(app)
         self.tab_integrations = IntegrationsTab(app)
         self.tab_profiles = ProfilesTab(app)
+        self.tab_space = SpaceTab(app)
         self.tab_logs = LogsTab(app)
         for w, name in (
             (self.tab_dashboard, "Dashboard"),
             (self.tab_models, "Modelos"),
             (self.tab_integrations, "Integraciones"),
             (self.tab_profiles, "Perfiles"),
+            (self.tab_space, "Espacio"),
             (self.tab_logs, "Logs"),
         ):
             nb.append_page(w, Gtk.Label(label=name))
