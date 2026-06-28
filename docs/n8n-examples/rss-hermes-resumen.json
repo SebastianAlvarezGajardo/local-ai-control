@@ -1,0 +1,99 @@
+{
+  "name": "RSS → Hermes 3 (resumen) → local",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-trigger",
+      "name": "Al hacer clic",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [220, 320]
+    },
+    {
+      "parameters": {
+        "url": "https://hnrss.org/frontpage",
+        "options": {}
+      },
+      "id": "node-rss",
+      "name": "Leer RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [440, 320]
+    },
+    {
+      "parameters": {
+        "maxItems": 5
+      },
+      "id": "node-limit",
+      "name": "Solo 5 noticias",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [660, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"hermes3:8b\", prompt: \"Resume en 2 frases y en español esta noticia. Título: \" + $json.title + \". Contenido: \" + ($json.contentSnippet || $json.content || \"\"), stream: false }) }}",
+        "options": {}
+      },
+      "id": "node-ollama",
+      "name": "Resumir con Hermes 3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 320]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "titulo",
+              "value": "={{ $('Solo 5 noticias').item.json.title }}",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "resumen",
+              "value": "={{ $json.response }}",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "enlace",
+              "value": "={{ $('Solo 5 noticias').item.json.link }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-set",
+      "name": "Título + resumen + enlace",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, 320]
+    }
+  ],
+  "connections": {
+    "Al hacer clic": {
+      "main": [[{ "node": "Leer RSS", "type": "main", "index": 0 }]]
+    },
+    "Leer RSS": {
+      "main": [[{ "node": "Solo 5 noticias", "type": "main", "index": 0 }]]
+    },
+    "Solo 5 noticias": {
+      "main": [[{ "node": "Resumir con Hermes 3", "type": "main", "index": 0 }]]
+    },
+    "Resumir con Hermes 3": {
+      "main": [[{ "node": "Título + resumen + enlace", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "pinData": {},
+  "meta": {}
+}
