@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import shlex
 import signal
@@ -38,11 +39,22 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────
 APP_NAME = "local-ai-control"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_DIR = os.path.expanduser(os.environ.get("COMFYUI_DIR", "~/ComfyUI"))
+# Checkpoint por defecto: el MEJOR modelo abierto, no el más ligero.
+# FLUX.1-schnell fp8 (all-in-one: lleva T5+CLIP+VAE → carga directo con el
+# CheckpointLoader estándar) · licencia Apache-2.0 (uso comercial libre, vale
+# para trabajo de clientes) · 4 pasos. ~16 GB: no entra en los 8 GB de VRAM
+# pero ComfyUI lo corre con offload de pesos a RAM (más lento, asumido).
+# Flux-dev daría algo más de calidad pero su licencia es no-comercial.
+COMFY_DEFAULT_MODEL_NAME = "flux1-schnell-fp8.safetensors"
+COMFY_DEFAULT_MODEL_URL = (
+    "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/"
+    "flux1-schnell-fp8.safetensors"
+)
 N8N_URL = os.environ.get("N8N_URL", "http://localhost:5678")
 REFRESH_MS = 4000
 STATS_REFRESH_MS = 2000
@@ -74,6 +86,37 @@ CATALOG: list[tuple[str, str]] = [
     # — utilidad —
     ("nomic-embed-text", "Embeddings (para RAG) — ~274 MB"),
 ]
+
+# Best general-purpose default per VRAM bracket — preload the strongest model the
+# hardware can comfortably run alongside the desktop. This is the SINGLE knob for
+# "preload the best you can run": bump these as lighter/stronger models ship (e.g.
+# a future 4B that beats today's 12B) and every user auto-upgrades on next onboard.
+RECOMMENDED_BY_VRAM: list[tuple[float, str]] = [
+    (15.0, "gemma3:12b"),  # ~16 GB+ VRAM
+    (7.0, "gemma3:4b"),    # ~8 GB VRAM (e.g. RX 7600 / 7700S)
+    (0.0, "gemma3:1b"),    # CPU-only / small GPU
+]
+
+# First-run state (so the onboarding flow shows exactly once).
+STATE_DIR = os.path.expanduser("~/.config/local-ai-control")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+
+
+def load_state() -> dict:
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(d: dict) -> None:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump(d, f, indent=2)
+    except OSError:
+        pass
 
 
 # ── Backend: Ollama HTTP API ──────────────────────────────────────────────
@@ -191,6 +234,45 @@ def gpu_stats() -> tuple[int, int, int] | None:
     return None
 
 
+def recommended_model() -> str:
+    """Strongest catalog model that fits the detected GPU. See RECOMMENDED_BY_VRAM."""
+    g = gpu_stats()
+    total_gb = (g[0] / 1e9) if g else 0.0
+    for need, model in RECOMMENDED_BY_VRAM:
+        if total_gb >= need:
+            return model
+    return "gemma3:1b"
+
+
+def launch_chat(model: str) -> None:
+    """Drop the user straight into a chat: Open WebUI if running, else a terminal."""
+    if webui_running():
+        webbrowser.open(OPEN_WEBUI)
+    else:
+        open_terminal(f"ollama run {shlex.quote(model)}")
+
+
+def set_default_model(name: str) -> None:
+    """Remember the user's pick. It becomes the default for chat / «Empezar a usar»."""
+    st = load_state()
+    st["model"] = name
+    save_state(st)
+
+
+def default_model() -> str | None:
+    """Model to use by default: the user's saved pick if still installed, else the
+    best one for this GPU, else whatever's installed, else None. The saved pick
+    always wins — the recommendation is only the fallback when nothing was chosen."""
+    installed = [m.get("name", "") for m in installed_models()]
+    pref = load_state().get("model")
+    if pref and pref in installed:
+        return pref
+    rec = recommended_model()
+    if rec in installed:
+        return rec
+    return installed[0] if installed else None
+
+
 def cpu_load() -> float:
     try:
         return os.getloadavg()[0]
@@ -265,12 +347,53 @@ def comfyui_installed() -> bool:
     return os.path.isfile(os.path.join(COMFYUI_DIR, "main.py"))
 
 
+def comfyui_has_checkpoint() -> bool:
+    """True si hay al menos un modelo real en models/checkpoints/.
+
+    ComfyUI arranca sin checkpoint pero no puede generar nada — distinguimos
+    el placeholder `put_checkpoints_here` de un .safetensors/.ckpt de verdad.
+    """
+    ckpt_dir = os.path.join(COMFYUI_DIR, "models", "checkpoints")
+    try:
+        return any(
+            f.endswith((".safetensors", ".ckpt"))
+            for f in os.listdir(ckpt_dir)
+        )
+    except OSError:
+        return False
+
+
 def comfyui_running() -> bool:
     try:
         urllib.request.urlopen(COMFYUI_URL, timeout=1)
         return True
     except Exception:
         return False
+
+
+def pid_on_port(port: int) -> int | None:
+    """PID of the process LISTENING on a TCP port.
+
+    The most reliable 'is this web service up, and which PID do I stop?' —
+    independent of how it was launched (relative `python main.py`, a bash
+    wrapper, a system vs nvm install…). Returns the listener itself, so
+    stopping it frees the port instead of killing a wrapper and orphaning
+    the real server. Only sees PIDs the current user can read (fine: these
+    run as us). None if nothing listens or `ss` is unavailable.
+    """
+    try:
+        r = subprocess.run(
+            ["ss", "-ltnHp", f"sport = :{port}"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        m = re.search(r"pid=(\d+)", r.stdout)
+        if m:
+            return int(m.group(1))
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
 
 
 def find_pid_matching(pattern: str) -> int | None:
@@ -321,13 +444,21 @@ def stop_pid(pid: int, timeout: float = 3.0) -> bool:
 
 
 def webui_pid() -> int | None:
-    """Find the running open-webui server process, if any."""
-    return find_pid_matching(r"open[-_]webui.*serve|uvicorn.*open_webui")
+    """Running open-webui server, if any. Port first (robust), then cmdline
+    so the '🟡 arrancando' window before it binds :8080 still shows."""
+    return pid_on_port(8080) or find_pid_matching(
+        r"open[-_]webui.*serve|uvicorn.*open_webui"
+    )
 
 
 def comfyui_pid() -> int | None:
-    """Find the running ComfyUI main.py process, if any."""
-    return find_pid_matching(r"ComfyUI/.*python.*main\.py|ComfyUI.*main\.py.*--listen")
+    """Running ComfyUI server, if any. Port first: the real python is just
+    `python main.py --listen` (launched via `cd ~/ComfyUI && …`, so the path
+    isn't in its args) — only the listener on :8188 is reliable. Cmdline
+    fallback covers the bind window before the port is up."""
+    return pid_on_port(8188) or find_pid_matching(
+        r"ComfyUI.*main\.py|python3?\s+main\.py.*--listen"
+    )
 
 
 def n8n_installed() -> bool:
@@ -343,8 +474,16 @@ def n8n_running() -> bool:
 
 
 def n8n_pid() -> int | None:
-    """The actual process is `node .../n8n/bin/n8n` — match that."""
-    return find_pid_matching(r"node.*n8n/bin/n8n|n8n[^=]*start$")
+    """Find the running n8n server, whatever the install path.
+
+    Matches both our nvm install (`node …/n8n/bin/n8n`) and a system one
+    (`node /usr/bin/n8n`). The leading `node \\S*/bin/n8n` deliberately won't
+    match the task-runner child (`node … task-runner/dist/start.js`), so we
+    return the real server PID, not its helper.
+    """
+    return pid_on_port(5678) or find_pid_matching(
+        r"node\s+\S*/bin/n8n(\s|$)|n8n\s+start\b"
+    )
 
 
 def human_size(b: float) -> str:
@@ -712,7 +851,7 @@ class ModelsTab(Gtk.Box):
         # — Instalados —
         ins_frame, ins_box = make_card(
             "Modelos instalados",
-            subtitle="Pulsa «chatear» para un terminal con  <tt>ollama run NOMBRE</tt>",
+            subtitle="«chatear» abre un terminal y fija el modelo · ★ marca el que se usa por defecto",
         )
         self.installed_box = ins_box
         outer.pack_start(ins_frame, False, False, 0)
@@ -773,19 +912,42 @@ class ModelsTab(Gtk.Box):
                 0,
             )
         else:
+            cur = default_model()
             for m in installed:
                 name = m.get("name", "?")
                 size = human_size(m.get("size", 0))
+                is_def = name == cur
+                bstar = Gtk.Button(label="★" if is_def else "☆")
+                bstar.set_tooltip_text(
+                    "Es tu modelo por defecto" if is_def
+                    else "Fijar como modelo por defecto (chat / «Empezar a usar»)"
+                )
+                bstar.set_sensitive(not is_def)
+                bstar.connect("clicked", lambda _w, n=name: self._set_default(n))
                 bchat = Gtk.Button(label="chatear")
-                bchat.set_tooltip_text(f"Abre un terminal con  ollama run {name}")
-                bchat.connect("clicked", lambda _w, n=name: open_terminal(f"ollama run {n}"))
+                bchat.set_tooltip_text(
+                    f"Abre un terminal con  ollama run {name}  (y lo fija por defecto)"
+                )
+                bchat.connect("clicked", lambda _w, n=name: self._chat(n))
                 bdel = Gtk.Button(label="🗑")
                 bdel.set_tooltip_text(f"Borrar {name} del disco")
                 bdel.connect("clicked", lambda _w, n=name: self._del(n))
+                extra = "  · <b>por defecto</b>" if is_def else ""
                 self.installed_box.pack_start(
-                    model_row(name, size, buttons=[bdel, bchat]), False, False, 0
+                    model_row(name, size, extra=extra, buttons=[bdel, bstar, bchat]),
+                    False, False, 0,
                 )
         self.show_all()
+
+    def _set_default(self, name: str) -> None:
+        set_default_model(name)
+        notify("Modelo por defecto", name)
+        self.app.refresh_all()
+
+    def _chat(self, name: str) -> None:
+        set_default_model(name)  # elegir = usar: queda definido como por defecto
+        open_terminal(f"ollama run {shlex.quote(name)}")
+        self.app.refresh_all()
 
     def _del(self, name: str) -> None:
         d = Gtk.MessageDialog(
@@ -1082,14 +1244,26 @@ class IntegrationsTab(Gtk.Box):
         self.btn_comfy_start.connect("clicked", self._toggle_comfyui)
         self.btn_comfy_open = Gtk.Button(label="Abrir en navegador")
         self.btn_comfy_open.connect("clicked", lambda _: webbrowser.open(COMFYUI_URL))
+        self.btn_comfy_model = Gtk.Button(label="⬇ Descargar modelo")
+        self.btn_comfy_model.set_tooltip_text(
+            f"Descarga {COMFY_DEFAULT_MODEL_NAME} (FLUX.1 schnell, ~16 GB) en "
+            "models/checkpoints/ para poder generar ya."
+        )
+        self.btn_comfy_model.connect("clicked", self._download_comfy_model)
         self.btn_comfy_install.set_no_show_all(True)
+        self.btn_comfy_model.set_no_show_all(True)
         self.comfyui_status = Gtk.Label(xalign=0)
         cat_image.pack_start(
             self._card(
                 "🎨 ComfyUI",
                 "generación de imagen local · SDXL, SD 1.5, Flux schnell",
                 self.comfyui_status,
-                [self.btn_comfy_install, self.btn_comfy_start, self.btn_comfy_open],
+                [
+                    self.btn_comfy_install,
+                    self.btn_comfy_model,
+                    self.btn_comfy_start,
+                    self.btn_comfy_open,
+                ],
             ),
             False,
             False,
@@ -1185,17 +1359,48 @@ class IntegrationsTab(Gtk.Box):
         return chosen
 
     def _launch_opencode(self, _w: Gtk.Button) -> None:
+        # Resolve the absolute path: gnome-terminal's `bash -c` is non-login/
+        # non-interactive and never sources .bashrc/.profile, so ~/.opencode/bin
+        # isn't on its PATH → bare `opencode` gives "orden no encontrada".
+        binary = find_binary("opencode")
+        if not binary:
+            return
         folder = self._pick_folder("Carpeta de proyecto para opencode")
         if folder:
-            open_terminal(f"cd {shlex.quote(folder)} && opencode")
+            open_terminal(f"cd {shlex.quote(folder)} && {shlex.quote(binary)}")
 
     def _launch_aider(self, _w: Gtk.Button) -> None:
+        # Same PATH caveat as opencode — use the absolute path find_binary found.
+        binary = find_binary("aider")
+        if not binary:
+            return
         folder = self._pick_folder("Carpeta de proyecto para Aider")
         if folder:
             open_terminal(
                 f"cd {shlex.quote(folder)} && "
-                "aider --model ollama_chat/qwen2.5-coder:7b --no-show-model-warnings"
+                f"{shlex.quote(binary)} "
+                "--model ollama_chat/qwen2.5-coder:7b --no-show-model-warnings"
             )
+
+    def _open_when_ready(self, url: str, ready_fn, timeout: float = 120.0) -> None:
+        """Poll a just-started web service in the background and open the
+        browser once its HTTP endpoint answers — so 'Iniciar' means
+        enciende-y-usa without hunting for the Abrir button afterwards.
+
+        Runs in a daemon thread (HTTP polling would freeze the GTK loop);
+        all UI/browser calls are bounced back via GLib.idle_add.
+        """
+
+        def worker() -> None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if ready_fn():
+                    GLib.idle_add(webbrowser.open, url)
+                    GLib.idle_add(self.app.refresh_all)
+                    return
+                time.sleep(1.5)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _toggle_webui(self, _w: Gtk.Button) -> None:
         """One button to rule both: start if stopped, stop if running."""
@@ -1205,6 +1410,40 @@ class IntegrationsTab(Gtk.Box):
             GLib.idle_add(self.app.refresh_all)
         else:
             open_terminal("open-webui serve")
+            self._open_when_ready(OPEN_WEBUI, webui_running)
+
+    def _download_comfy_model(self, _w: Gtk.Button) -> None:
+        ckpt_dir = os.path.join(COMFYUI_DIR, "models", "checkpoints")
+        dest = os.path.join(ckpt_dir, COMFY_DEFAULT_MODEL_NAME)
+        # wget -c reanuda si se cortó; --show-progress da barra en el terminal.
+        # Al terminar refrescamos el panel para que el botón desaparezca y
+        # "Iniciar" quede como único paso → enciende y usa.
+        cmd = (
+            f"mkdir -p {shlex.quote(ckpt_dir)} && "
+            f"echo '── Descargando FLUX.1 schnell (~16 GB) ──' && "
+            f"echo 'Destino: {dest}' && echo && "
+            f"wget -c --show-progress -O {shlex.quote(dest)} "
+            f"{shlex.quote(COMFY_DEFAULT_MODEL_URL)} && "
+            "echo && echo '✅ Modelo listo. Vuelve al panel y pulsa \"Iniciar servicio\".'"
+        )
+        open_terminal(cmd)
+
+        def watch() -> None:
+            # Espera (hasta 1h) a que el .safetensors exista y deje de crecer.
+            deadline = time.monotonic() + 3600
+            last = -1
+            while time.monotonic() < deadline:
+                try:
+                    size = os.path.getsize(dest)
+                except OSError:
+                    size = -1
+                if size > 0 and size == last and comfyui_has_checkpoint():
+                    GLib.idle_add(self.app.refresh_all)
+                    return
+                last = size
+                time.sleep(5)
+
+        threading.Thread(target=watch, daemon=True).start()
 
     def _toggle_comfyui(self, _w: Gtk.Button) -> None:
         if pid := comfyui_pid():
@@ -1213,6 +1452,7 @@ class IntegrationsTab(Gtk.Box):
             GLib.idle_add(self.app.refresh_all)
         else:
             open_terminal(self._comfy_start_cmd)
+            self._open_when_ready(COMFYUI_URL, comfyui_running)
 
     def _toggle_n8n(self, _w: Gtk.Button) -> None:
         if pid := n8n_pid():
@@ -1221,6 +1461,7 @@ class IntegrationsTab(Gtk.Box):
             GLib.idle_add(self.app.refresh_all)
         else:
             open_terminal(self._n8n_start_cmd)
+            self._open_when_ready(N8N_URL, n8n_running)
 
     def _category(
         self,
@@ -1340,9 +1581,11 @@ class IntegrationsTab(Gtk.Box):
         if comfyui_installed():
             pid = comfyui_pid()
             http_ok = comfyui_running() if pid else False
+            has_model = comfyui_has_checkpoint()
+            no_model = "" if has_model else " · ⚠️ sin modelo (Descargar)"
             if pid and http_ok:
                 self.comfyui_status.set_markup(
-                    f"✅ instalado · 🟢 corriendo en :8188 · PID {pid}"
+                    f"✅ instalado · 🟢 corriendo en :8188 · PID {pid}{no_model}"
                 )
                 self.btn_comfy_start.set_label("⏹ Parar")
             elif pid:
@@ -1351,9 +1594,13 @@ class IntegrationsTab(Gtk.Box):
                 )
                 self.btn_comfy_start.set_label("⏹ Parar")
             else:
-                self.comfyui_status.set_markup("✅ instalado · 🔴 parado")
+                self.comfyui_status.set_markup(
+                    f"✅ instalado · 🔴 parado{no_model}"
+                )
                 self.btn_comfy_start.set_label("Iniciar servicio")
             self.btn_comfy_install.set_visible(False)  # ya está
+            # El botón de modelo solo molesta cuando ya hay checkpoint → ocúltalo.
+            self.btn_comfy_model.set_visible(not has_model)
             self.btn_comfy_start.set_sensitive(True)
             self.btn_comfy_open.set_sensitive(bool(http_ok))
         else:
@@ -1363,6 +1610,7 @@ class IntegrationsTab(Gtk.Box):
             self.btn_comfy_start.set_label("Iniciar servicio")
             self.btn_comfy_install.set_visible(True)
             self.btn_comfy_install.set_sensitive(True)
+            self.btn_comfy_model.set_visible(False)  # sin ComfyUI no hay dónde ponerlo
             self.btn_comfy_start.set_sensitive(False)
             self.btn_comfy_open.set_sensitive(False)
 
@@ -1492,11 +1740,168 @@ class ProfilesTab(Gtk.Box):
 
 
 # ── UI: window + tray ─────────────────────────────────────────────────────
+class OnboardingWindow(Gtk.Window):
+    """First-run flow: turn Ollama on, preload the best model this GPU can run, then
+    drop straight into chat. Zero decisions — this is the 'enciende y usa' promise.
+
+    Shown once (guarded by state['onboarded']). All blocking work runs in a worker
+    thread; UI touches go through GLib.idle_add so the panel never freezes.
+    """
+
+    def __init__(self, app: "App"):
+        super().__init__(title="Bienvenido · local-ai-control")
+        self.app = app
+        self.set_default_size(480, 360)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_icon_name("local-ai-control")
+        # Respect a prior pick if there is one; otherwise the best model for this GPU.
+        self.model = default_model() or recommended_model()
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=24)
+        self.add(outer)
+
+        title = Gtk.Label(xalign=0)
+        title.set_markup(
+            "<span size='22000'>👋</span>  <big><b>Tu IA local, lista en un momento</b></big>"
+        )
+        outer.pack_start(title, False, False, 0)
+        sub = Gtk.Label(xalign=0, wrap=True)
+        sub.set_markup(
+            "<span alpha='70%'>No tienes que configurar nada. Enciendo el servicio, "
+            "preparo el mejor modelo que admite tu equipo y empiezas a usarlo.</span>"
+        )
+        outer.pack_start(sub, False, False, 0)
+
+        steps = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8)
+        self.step_service = Gtk.Label(xalign=0)
+        self.step_model = Gtk.Label(xalign=0)
+        steps.pack_start(self.step_service, False, False, 0)
+        steps.pack_start(self.step_model, False, False, 0)
+        outer.pack_start(steps, False, False, 0)
+        self._set_step(self.step_service, "pending", "Encender el servicio Ollama")
+        self._set_step(self.step_model, "pending", "Preparar el mejor modelo para tu GPU")
+
+        self.progress = Gtk.ProgressBar(show_text=True)
+        self.progress.set_text("")
+        outer.pack_start(self.progress, False, False, 0)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, margin_top=8)
+        self.btn_skip = Gtk.Button(label="Saltar e ir al panel")
+        self.btn_skip.connect("clicked", lambda _: self._finish(open_chat=False))
+        self.btn_start = Gtk.Button(label="🚀 Empezar a usar")
+        self.btn_start.get_style_context().add_class("suggested-action")
+        self.btn_start.set_sensitive(False)
+        self.btn_start.connect("clicked", lambda _: self._finish(open_chat=True))
+        btns.pack_start(self.btn_skip, False, False, 0)
+        btns.pack_end(self.btn_start, False, False, 0)
+        outer.pack_end(btns, False, False, 0)
+
+        self.connect("delete-event", self._on_close)
+        self.show_all()
+        threading.Thread(target=self._run_steps, daemon=True).start()
+
+    @staticmethod
+    def _set_step(lbl: Gtk.Label, state: str, text: str) -> bool:
+        icon = {"pending": "⏳", "active": "🔄", "done": "✓", "fail": "⚠"}.get(state, "•")
+        lbl.set_markup(f"<big>{icon}</big>  {GLib.markup_escape_text(text)}")
+        return False
+
+    def _run_steps(self) -> None:
+        # 1) service on (start it and wait up to ~10s for the API to answer)
+        GLib.idle_add(
+            self._set_step, self.step_service, "active", "Encendiendo el servicio Ollama…"
+        )
+        if not service_up():
+            systemctl("start")
+            for _ in range(20):
+                if service_up():
+                    break
+                time.sleep(0.5)
+        if not service_up():
+            GLib.idle_add(
+                self._set_step, self.step_service, "fail",
+                "No se pudo encender Ollama (hazlo desde el panel)",
+            )
+            GLib.idle_add(self._fail, "No pude arrancar el servicio.")
+            return
+        GLib.idle_add(self._set_step, self.step_service, "done", "Servicio Ollama encendido")
+
+        # 2) ensure a usable model — never re-download if one already exists
+        installed = [m.get("name", "") for m in installed_models()]
+        if self.model in installed:
+            chosen = self.model
+        elif installed:
+            chosen = installed[0]  # already have something usable → zero wait
+        else:
+            chosen = None
+
+        if chosen:
+            self.model = chosen
+            set_default_model(chosen)
+            GLib.idle_add(self._set_step, self.step_model, "done", f"Modelo listo: {chosen}")
+            GLib.idle_add(self._ready)
+            return
+
+        # nothing installed → download the recommended one with live progress
+        GLib.idle_add(
+            self._set_step, self.step_model, "active", f"Descargando {self.model}…"
+        )
+
+        def on_prog(status, pct):  # already marshalled to main loop by pull_model_stream
+            if pct is not None:
+                self.progress.set_fraction(pct)
+                self.progress.set_text(f"{status} · {int(pct * 100)}%")
+            else:
+                self.progress.pulse()
+                self.progress.set_text(status)
+            return False
+
+        pull_model_stream(self.model, on_prog, lambda *_: False)  # blocks until stream ends
+        if any(m.get("name") == self.model for m in installed_models()):
+            set_default_model(self.model)
+            GLib.idle_add(self._set_step, self.step_model, "done", f"Modelo listo: {self.model}")
+            GLib.idle_add(self._ready)
+        else:
+            GLib.idle_add(
+                self._set_step, self.step_model, "fail", "No se pudo descargar el modelo"
+            )
+            GLib.idle_add(self._fail, "Falló la descarga. Puedes hacerlo luego en «Modelos».")
+
+    def _ready(self) -> bool:
+        self.progress.set_fraction(1.0)
+        self.progress.set_text("Todo listo ✓")
+        self.btn_start.set_sensitive(True)
+        return False
+
+    def _fail(self, msg: str) -> bool:
+        self.progress.set_fraction(0)
+        self.progress.set_text(f"⚠ {msg}")
+        self.btn_skip.set_label("Ir al panel")
+        return False
+
+    def _on_close(self, *_) -> bool:
+        self._finish(open_chat=False)
+        return True
+
+    def _finish(self, open_chat: bool) -> None:
+        st = load_state()
+        st["onboarded"] = True
+        save_state(st)
+        if open_chat:
+            launch_chat(self.model)
+        self.app._onboarding = None
+        self.destroy()
+        if not open_chat:
+            self.app.window.show_all()
+            self.app.window.present()
+        self.app.refresh_all()
+
+
 class ControlWindow(Gtk.Window):
     def __init__(self, app: "App"):
         super().__init__(title=f"local-ai-control · v{VERSION}")
         self.set_default_size(860, 640)
-        self.set_icon_name("computer")
+        self.set_icon_name("local-ai-control")
         self.app = app
 
         nb = Gtk.Notebook()
@@ -1546,6 +1951,11 @@ class App:
         self.window = ControlWindow(self)
         self._build_menu()
         self.refresh()
+        # First run: hide the panel and run the zero-friction onboarding instead.
+        self._onboarding = None
+        if not load_state().get("onboarded"):
+            self.window.hide()
+            self._onboarding = OnboardingWindow(self)
         GLib.timeout_add(REFRESH_MS, self._tick)
 
     def _build_menu(self) -> None:
@@ -1671,7 +2081,7 @@ class App:
 def main() -> None:
     show = "--show" in sys.argv
     app = App()
-    if show:
+    if show and not app._onboarding:
         app.window.present()
     Gtk.main()
 
