@@ -1417,11 +1417,19 @@ class IntegrationsTab(Gtk.Box):
         all UI/browser calls are bounced back via GLib.idle_add.
         """
 
+        def open_once() -> bool:
+            # CRÍTICO: idle_add RE-EJECUTA el callback mientras devuelva True, y
+            # webbrowser.open() devuelve True al abrir → pasarlo tal cual reabría
+            # la pestaña en bucle infinito (bug "mil pestañas"). Devolver False
+            # quita el handler tras una sola apertura.
+            webbrowser.open(url)
+            return False
+
         def worker() -> None:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if ready_fn():
-                    GLib.idle_add(webbrowser.open, url)
+                    GLib.idle_add(open_once)
                     GLib.idle_add(self.app.refresh_all)
                     return
                 time.sleep(1.5)
