@@ -44,16 +44,35 @@ API = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OPEN_WEBUI = os.environ.get("OPEN_WEBUI_URL", "http://localhost:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_DIR = os.path.expanduser(os.environ.get("COMFYUI_DIR", "~/ComfyUI"))
-# Checkpoint por defecto: el MEJOR modelo abierto, no el más ligero.
-# FLUX.1-schnell fp8 (all-in-one: lleva T5+CLIP+VAE → carga directo con el
-# CheckpointLoader estándar) · licencia Apache-2.0 (uso comercial libre, vale
-# para trabajo de clientes) · 4 pasos. ~16 GB: no entra en los 8 GB de VRAM
-# pero ComfyUI lo corre con offload de pesos a RAM (más lento, asumido).
-# Flux-dev daría algo más de calidad pero su licencia es no-comercial.
-COMFY_DEFAULT_MODEL_NAME = "flux1-schnell-fp8.safetensors"
-COMFY_DEFAULT_MODEL_URL = (
-    "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/"
-    "flux1-schnell-fp8.safetensors"
+# Catálogo de checkpoints descargables a models/checkpoints/. El primero es el
+# por defecto (el "mejor"): FLUX.1-schnell fp8 — all-in-one (T5+CLIP+VAE → carga
+# directo con el CheckpointLoader estándar), Apache-2.0 (uso comercial libre),
+# 4 pasos. ~16 GB no entra en 8 GB de VRAM pero ComfyUI lo corre con offload a
+# RAM (más lento, asumido). Flux-dev daría algo más de calidad pero es no
+# comercial. Los SDXL son alternativas ligeras que sí caben en VRAM. URLs
+# verificadas (HTTP 200) 2026-06-28.
+COMFY_MODELS = (
+    {
+        "key": "flux-schnell",
+        "label": "FLUX.1 schnell · ~16 GB · el mejor",
+        "filename": "flux1-schnell-fp8.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors",
+        "note": "Mejor calidad, Apache-2.0 (uso comercial). Corre con offload a RAM.",
+    },
+    {
+        "key": "sdxl-base",
+        "label": "SDXL base 1.0 · ~6,5 GB · equilibrado",
+        "filename": "sd_xl_base_1.0.safetensors",
+        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+        "note": "Gran calidad y entra en 8 GB de VRAM. Mil LoRAs disponibles.",
+    },
+    {
+        "key": "sdxl-turbo",
+        "label": "SDXL Turbo · ~6,5 GB · rapidísimo (1 paso)",
+        "filename": "sd_xl_turbo_1.0_fp16.safetensors",
+        "url": "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors",
+        "note": "El más rápido (1 paso), ideal para iterar. Calidad algo menor.",
+    },
 )
 N8N_URL = os.environ.get("N8N_URL", "http://localhost:5678")
 REFRESH_MS = 4000
@@ -1244,14 +1263,20 @@ class IntegrationsTab(Gtk.Box):
         self.btn_comfy_start.connect("clicked", self._toggle_comfyui)
         self.btn_comfy_open = Gtk.Button(label="Abrir en navegador")
         self.btn_comfy_open.connect("clicked", lambda _: webbrowser.open(COMFYUI_URL))
-        self.btn_comfy_model = Gtk.Button(label="⬇ Descargar modelo")
-        self.btn_comfy_model.set_tooltip_text(
-            f"Descarga {COMFY_DEFAULT_MODEL_NAME} (FLUX.1 schnell, ~16 GB) en "
-            "models/checkpoints/ para poder generar ya."
-        )
+        # Desplegable de modelo + botón de descarga. El primero del catálogo
+        # (FLUX.1 schnell, el mejor) queda preseleccionado; el tooltip muestra
+        # la nota del modelo elegido y se actualiza al cambiar la selección.
+        self.combo_comfy_model = Gtk.ComboBoxText()
+        for m in COMFY_MODELS:
+            self.combo_comfy_model.append(m["key"], m["label"])
+        self.combo_comfy_model.set_active(0)
+        self.combo_comfy_model.connect("changed", self._on_comfy_model_changed)
+        self.btn_comfy_model = Gtk.Button(label="⬇ Descargar")
         self.btn_comfy_model.connect("clicked", self._download_comfy_model)
         self.btn_comfy_install.set_no_show_all(True)
         self.btn_comfy_model.set_no_show_all(True)
+        self.combo_comfy_model.set_no_show_all(True)
+        self._on_comfy_model_changed(self.combo_comfy_model)  # tooltip inicial
         self.comfyui_status = Gtk.Label(xalign=0)
         cat_image.pack_start(
             self._card(
@@ -1260,6 +1285,7 @@ class IntegrationsTab(Gtk.Box):
                 self.comfyui_status,
                 [
                     self.btn_comfy_install,
+                    self.combo_comfy_model,
                     self.btn_comfy_model,
                     self.btn_comfy_start,
                     self.btn_comfy_open,
@@ -1412,18 +1438,32 @@ class IntegrationsTab(Gtk.Box):
             open_terminal("open-webui serve")
             self._open_when_ready(OPEN_WEBUI, webui_running)
 
+    def _selected_comfy_model(self) -> dict:
+        """El modelo elegido en el desplegable (o el primero como fallback)."""
+        key = self.combo_comfy_model.get_active_id()
+        for m in COMFY_MODELS:
+            if m["key"] == key:
+                return m
+        return COMFY_MODELS[0]
+
+    def _on_comfy_model_changed(self, combo: Gtk.ComboBoxText) -> None:
+        m = self._selected_comfy_model()
+        self.btn_comfy_model.set_tooltip_text(
+            f"Descarga {m['filename']} en models/checkpoints/. {m['note']}"
+        )
+
     def _download_comfy_model(self, _w: Gtk.Button) -> None:
+        model = self._selected_comfy_model()
         ckpt_dir = os.path.join(COMFYUI_DIR, "models", "checkpoints")
-        dest = os.path.join(ckpt_dir, COMFY_DEFAULT_MODEL_NAME)
+        dest = os.path.join(ckpt_dir, model["filename"])
         # wget -c reanuda si se cortó; --show-progress da barra en el terminal.
-        # Al terminar refrescamos el panel para que el botón desaparezca y
-        # "Iniciar" quede como único paso → enciende y usa.
+        # Al terminar refrescamos el panel para reflejar que ya hay checkpoint.
         cmd = (
             f"mkdir -p {shlex.quote(ckpt_dir)} && "
-            f"echo '── Descargando FLUX.1 schnell (~16 GB) ──' && "
+            f"echo {shlex.quote('── Descargando ' + model['label'] + ' ──')} && "
             f"echo 'Destino: {dest}' && echo && "
             f"wget -c --show-progress -O {shlex.quote(dest)} "
-            f"{shlex.quote(COMFY_DEFAULT_MODEL_URL)} && "
+            f"{shlex.quote(model['url'])} && "
             "echo && echo '✅ Modelo listo. Vuelve al panel y pulsa \"Iniciar servicio\".'"
         )
         open_terminal(cmd)
@@ -1599,8 +1639,10 @@ class IntegrationsTab(Gtk.Box):
                 )
                 self.btn_comfy_start.set_label("Iniciar servicio")
             self.btn_comfy_install.set_visible(False)  # ya está
-            # El botón de modelo solo molesta cuando ya hay checkpoint → ocúltalo.
-            self.btn_comfy_model.set_visible(not has_model)
+            # Desplegable + descarga siempre visibles con ComfyUI instalado:
+            # sirve para el 1er modelo y para añadir/cambiar después.
+            self.combo_comfy_model.set_visible(True)
+            self.btn_comfy_model.set_visible(True)
             self.btn_comfy_start.set_sensitive(True)
             self.btn_comfy_open.set_sensitive(bool(http_ok))
         else:
@@ -1610,7 +1652,8 @@ class IntegrationsTab(Gtk.Box):
             self.btn_comfy_start.set_label("Iniciar servicio")
             self.btn_comfy_install.set_visible(True)
             self.btn_comfy_install.set_sensitive(True)
-            self.btn_comfy_model.set_visible(False)  # sin ComfyUI no hay dónde ponerlo
+            self.combo_comfy_model.set_visible(False)  # sin ComfyUI no hay dónde ponerlo
+            self.btn_comfy_model.set_visible(False)
             self.btn_comfy_start.set_sensitive(False)
             self.btn_comfy_open.set_sensitive(False)
 
