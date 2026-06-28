@@ -78,6 +78,13 @@ COMFY_MODELS = (
     },
 )
 N8N_URL = os.environ.get("N8N_URL", "http://localhost:5678")
+# Whisper.cpp: transcripción/voz local. El server trae web UI propia. Usamos
+# el :8910 para NO chocar con Open WebUI (:8080, el default de whisper-server).
+# Modelo multilingüe `base` (no base.en) para que entienda español.
+WHISPER_DIR = os.path.expanduser(os.environ.get("WHISPER_DIR", "~/whisper.cpp"))
+WHISPER_PORT = 8910
+WHISPER_URL = os.environ.get("WHISPER_URL", f"http://localhost:{WHISPER_PORT}")
+WHISPER_MODEL = "base"
 REFRESH_MS = 4000
 STATS_REFRESH_MS = 2000
 GPU_CARDS = ("/sys/class/drm/card1/device", "/sys/class/drm/card0/device")
@@ -590,6 +597,33 @@ def n8n_pid() -> int | None:
     return pid_on_port(5678) or find_pid_matching(
         r"node\s+\S*/bin/n8n(\s|$)|n8n\s+start\b"
     )
+
+
+def whisper_server_bin() -> str | None:
+    """Ruta al binario whisper-server compilado, si existe."""
+    p = os.path.join(WHISPER_DIR, "build", "bin", "whisper-server")
+    return p if os.path.isfile(p) else None
+
+
+def whisper_model_path() -> str:
+    return os.path.join(WHISPER_DIR, "models", f"ggml-{WHISPER_MODEL}.bin")
+
+
+def whisper_installed() -> bool:
+    """Necesita el server compilado Y el modelo descargado para ser usable."""
+    return whisper_server_bin() is not None and os.path.isfile(whisper_model_path())
+
+
+def whisper_running() -> bool:
+    try:
+        urllib.request.urlopen(WHISPER_URL, timeout=1)
+        return True
+    except Exception:
+        return False
+
+
+def whisper_pid() -> int | None:
+    return pid_on_port(WHISPER_PORT) or find_pid_matching(r"whisper-server")
 
 
 def human_size(b: float) -> str:
@@ -1226,6 +1260,9 @@ class IntegrationsTab(Gtk.Box):
         cat_auto = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8, margin_start=6
         )
+        cat_audio = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8, margin_start=6
+        )
 
         # — Open WebUI —
         self.btn_webui_install = Gtk.Button(label="Instalar (pipx)")
@@ -1423,6 +1460,52 @@ class IntegrationsTab(Gtk.Box):
             0,
         )
 
+        # — Whisper (transcripción / voz) —
+        # whisper.cpp: clona + compila con cmake + baja el modelo multilingüe
+        # `base`. El server trae su propia web UI; lo servimos en :8910 para no
+        # chocar con Open WebUI (:8080).
+        whisper_install_cmd = (
+            "set -e && "
+            "echo '── Instalando whisper.cpp (transcripción local) ──' && "
+            "echo 'Compila con cmake y baja el modelo base (~150 MB). Tarda unos minutos.' && "
+            "echo && "
+            "command -v cmake >/dev/null || { echo '❌ Falta cmake. Instala: sudo apt install cmake build-essential'; exit 1; } && "
+            f"git clone https://github.com/ggml-org/whisper.cpp {shlex.quote(WHISPER_DIR)} 2>/dev/null || echo '(ya clonado, sigo)' && "
+            f"cd {shlex.quote(WHISPER_DIR)} && "
+            "cmake -B build && "
+            "cmake --build build --config Release -j && "
+            f"bash ./models/download-ggml-model.sh {WHISPER_MODEL} && "
+            "echo && echo '✅ whisper.cpp listo. Vuelve al panel y pulsa \"Iniciar servicio\".'"
+        )
+        whisper_start_cmd = (
+            f"cd {shlex.quote(WHISPER_DIR)} && "
+            f"./build/bin/whisper-server -m {shlex.quote(whisper_model_path())} "
+            f"--host 0.0.0.0 --port {WHISPER_PORT}"
+        )
+        self._whisper_install_cmd = whisper_install_cmd
+        self._whisper_start_cmd = whisper_start_cmd
+        self.btn_whisper_install = Gtk.Button(label="Instalar")
+        self.btn_whisper_install.connect(
+            "clicked", lambda _: open_terminal(whisper_install_cmd)
+        )
+        self.btn_whisper_start = Gtk.Button(label="Iniciar servicio")
+        self.btn_whisper_start.connect("clicked", self._toggle_whisper)
+        self.btn_whisper_open = Gtk.Button(label="Abrir en navegador")
+        self.btn_whisper_open.connect("clicked", lambda _: webbrowser.open(WHISPER_URL))
+        self.btn_whisper_install.set_no_show_all(True)
+        self.whisper_status = Gtk.Label(xalign=0)
+        cat_audio.pack_start(
+            self._card(
+                "🎙️ Whisper",
+                "transcripción de voz local · whisper.cpp · multilingüe (español)",
+                self.whisper_status,
+                [self.btn_whisper_install, self.btn_whisper_start, self.btn_whisper_open],
+            ),
+            False,
+            False,
+            0,
+        )
+
         # Wrap each category in its own collapsible expander.
         # Default: only "Chat y memoria" expanded — the rest collapse to one
         # line so the tab fits in one screen. Click to expand on demand.
@@ -1447,6 +1530,12 @@ class IntegrationsTab(Gtk.Box):
         outer.pack_start(
             self._category(
                 "system-run-symbolic", "Automatización", cat_auto, expanded=False
+            ),
+            False, False, 0,
+        )
+        outer.pack_start(
+            self._category(
+                "audio-input-microphone-symbolic", "Audio / voz", cat_audio, expanded=False
             ),
             False, False, 0,
         )
@@ -1612,6 +1701,15 @@ class IntegrationsTab(Gtk.Box):
         else:
             open_terminal(self._n8n_start_cmd)
             self._open_when_ready(N8N_URL, n8n_running)
+
+    def _toggle_whisper(self, _w: Gtk.Button) -> None:
+        if pid := whisper_pid():
+            ok = stop_pid(pid)
+            notify("Whisper parado" if ok else "No se pudo parar Whisper", f"PID {pid}")
+            GLib.idle_add(self.app.refresh_all)
+        else:
+            open_terminal(self._whisper_start_cmd)
+            self._open_when_ready(WHISPER_URL, whisper_running)
 
     def _category(
         self,
@@ -1794,6 +1892,36 @@ class IntegrationsTab(Gtk.Box):
             self.btn_n8n_install.set_sensitive(True)
             self.btn_n8n_start.set_sensitive(False)
             self.btn_n8n_open.set_sensitive(False)
+
+        # ── Whisper ──
+        if whisper_installed():
+            pid = whisper_pid()
+            http_ok = whisper_running() if pid else False
+            if pid and http_ok:
+                self.whisper_status.set_markup(
+                    f"✅ instalado · 🟢 corriendo en :{WHISPER_PORT} · PID {pid}"
+                )
+                self.btn_whisper_start.set_label("⏹ Parar")
+            elif pid:
+                self.whisper_status.set_markup(
+                    f"✅ instalado · 🟡 arrancando (PID {pid})…"
+                )
+                self.btn_whisper_start.set_label("⏹ Parar")
+            else:
+                self.whisper_status.set_markup("✅ instalado · 🔴 parado")
+                self.btn_whisper_start.set_label("Iniciar servicio")
+            self.btn_whisper_install.set_visible(False)
+            self.btn_whisper_start.set_sensitive(True)
+            self.btn_whisper_open.set_sensitive(bool(http_ok))
+        else:
+            self.whisper_status.set_markup(
+                "❌ no instalado · compila whisper.cpp + modelo (~150 MB)"
+            )
+            self.btn_whisper_start.set_label("Iniciar servicio")
+            self.btn_whisper_install.set_visible(True)
+            self.btn_whisper_install.set_sensitive(True)
+            self.btn_whisper_start.set_sensitive(False)
+            self.btn_whisper_open.set_sensitive(False)
 
 
 class ProfilesTab(Gtk.Box):

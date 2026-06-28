@@ -1,6 +1,6 @@
 # local-ai-control
 
-> Una estación de control GTK con icono en la barra del sistema para tu IA local sobre **Ollama**. Encender/apagar el servicio, liberar VRAM al instante para jugar, descargar modelos, monitorizar GPU/RAM, leer los logs en vivo y lanzar integraciones (Open WebUI, opencode, Aider) — **todo desde un solo sitio**.
+> Una estación de control GTK con icono en la barra del sistema para tu IA local sobre **Ollama**. Encender/apagar el servicio, liberar VRAM al instante para jugar, descargar modelos, monitorizar GPU/RAM, leer los logs en vivo y lanzar integraciones (Open WebUI, opencode, Aider, ComfyUI, n8n, Whisper) — **todo desde un solo sitio**.
 
 > *English version below 🇬🇧*
 
@@ -21,7 +21,7 @@ En Mac y Windows Ollama trae una app de bandeja oficial; en Linux no. **`local-a
 - 📦 **Gestión de modelos** — descargar con barra de progreso real, borrar con confirmación, catálogo curado de modelos recomendados.
 - 📊 **Monitor de recursos** — VRAM, GPU activa %, RAM del sistema, carga CPU y RAM del proceso `ollama`, todo en vivo (lectura de `sysfs amdgpu` sin herramientas externas).
 - 📜 **Logs en vivo** — `journalctl -fu ollama` integrado en una pestaña.
-- 🔌 **Integraciones** — un clic para instalar/iniciar/abrir **Open WebUI** (chat web con memoria y RAG), **opencode**, **Aider** y **ComfyUI** (generación de imagen local con SDXL/SD 1.5/Flux).
+- 🔌 **Integraciones** — un clic para instalar/iniciar/abrir **Open WebUI** (chat web con memoria y RAG), **opencode**, **Aider**, **ComfyUI** (imagen local SDXL/SD 1.5/Flux, con descarga de modelo y workflow listo), **n8n** (workflows/agentes, ideal con Hermes 3) y **Whisper** (transcripción de voz local).
 - 🎚️ **Perfiles** — *Modo juego* libera VRAM; *Modo trabajo* precarga `qwen2.5-coder`; *Modo estudio* precarga `gemma3` y abre Open WebUI.
 
 ### Capturas
@@ -122,7 +122,7 @@ Ollama ships an official menu-bar app on macOS and Windows; not on Linux. **`loc
 - 📦 **Model management** — pull with real progress bar, delete with confirmation, curated quick-pick of recommended models.
 - 📊 **Resource monitor** — VRAM, GPU busy %, system RAM, CPU load and Ollama process RAM in real time (reads AMD GPU stats directly from `sysfs`, no extra tools needed).
 - 📜 **Live logs** — embedded `journalctl -fu ollama`.
-- 🔌 **Ecosystem integrations** — one-click install/launch for **Open WebUI** (web chat with memory + RAG), **opencode**, **Aider** and **ComfyUI** (local image generation with SDXL/SD 1.5/Flux).
+- 🔌 **Ecosystem integrations** — one-click install/launch for **Open WebUI** (web chat with memory + RAG), **opencode**, **Aider**, **ComfyUI** (local image generation with SDXL/SD 1.5/Flux, with model download + ready-made workflow), **n8n** (workflows/agents, great with Hermes 3) and **Whisper** (local voice transcription).
 - 🎚️ **Profiles** — *Gaming* frees VRAM; *Work* preloads `qwen2.5-coder`; *Study* preloads `gemma3` and opens Open WebUI.
 
 ### Install
